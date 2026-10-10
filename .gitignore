@@ -1,0 +1,32 @@
+# CUDA / C++ build outputs
+*.o
+*.obj
+*.exe
+*.lib
+*.exp
+*.pdb
+bench
+bandwidth
+build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Colab download bundle
+results.zip
+
+# Claude Code local-only settings
+.claude/settings.local.json
+
+# NOTE: results/*.csv, results/*.json and figures/*.png are committed deliberately.

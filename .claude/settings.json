@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(nvcc:*)",
+      "Bash(python scripts/*)",
+      "Bash(.venv/bin/python scripts/*)",
+      "Bash(.venv\\Scripts\\python scripts/*)",
+      "Bash(.venv/Scripts/python scripts/*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)"
+    ]
+  }
+}
