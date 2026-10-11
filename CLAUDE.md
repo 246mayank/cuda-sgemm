@@ -30,7 +30,8 @@ benchmarking tools to measure performance, validate improvements, and explain re
   with Kaggle (T4 / P100) as a fallback.
 - Build with `nvcc -O3 -arch=sm_75 -lcublas`. Keep `-arch` configurable via the Makefile.
 - `notebooks/run_on_colab.ipynb`: clone the repo → `nvidia-smi` → `make` → run the benchmark →
-  try `ncu` (expect `ERR_NVGPUCTRPERM`; record the outcome) → zip `results/` for download.
+  `ncu` DRAM-byte measurement (it worked on the Colab T4 on 2026-10-11, see
+  results/ncu_probe_Tesla_T4_2026-10-11.txt; if a later session blocks it, record that) → zip `results/`.
   Results then get committed from the local machine.
 
 ## Repository layout

@@ -4,6 +4,19 @@
 //   results/sgemm_<gpu>_<UTC timestamp>.csv
 //   results/env_<gpu>_<UTC timestamp>.json
 //
+// PAIRED cuBLAS TIMING (why pct_cublas is not just gflops / gflops of the cuBLAS row)
+//   A T4 is capped at 70 W. Under sustained load its SM clock drops, so a cuBLAS number
+//   measured at the start of a size and a kernel number measured a minute later are taken
+//   at different clocks. To compare like with like, every timed rep of a kernel is
+//   immediately followed by one timed cuBLAS call on the same inputs. pct_cublas is
+//   (median paired cuBLAS time) / (median kernel time) x 100, and the paired cuBLAS median
+//   is written in the extra column cublas_paired_median_ms. The "cublas" row itself is a
+//   standalone measurement taken before any kernel at that size.
+//
+// SIZE CAP
+//   v0_naive is only run up to 2048: at 4096 it takes ~2 s per launch, adds about a minute
+//   of heat to the GPU, and teaches nothing new (its GFLOP/s is flat from 1024 up).
+//
 // Usage: ./bench [--kernel <prefix>] [--size <n>] [--warmup <n>] [--reps <n>]
 //                [--tol <x>] [--no-write]
 //   --kernel v0     run only kernels whose name starts with "v0" (cuBLAS always runs; it is
@@ -35,6 +48,7 @@ using Launcher = std::function<void(int, int, int, const float*, const float*, f
 struct Kernel {
     std::string name;
     Launcher launch;
+    int max_size;  // sizes above this are skipped (no CSV row)
 };
 
 struct Row {
@@ -43,6 +57,7 @@ struct Row {
     TimingStats t;
     double gflops, pct_cublas, err;
     std::string status;
+    double cublas_paired_ms;  // NAN for the cuBLAS row itself
 };
 
 }  // namespace
@@ -88,8 +103,9 @@ int main(int argc, char** argv) {
                                  &zero, C, N));
     };
     std::vector<Kernel> all = {
-        {"v0_naive", launch_v0_naive},
-        {"v1_coalesced", launch_v1_coalesced},
+        {"v0_naive", launch_v0_naive, 2048},
+        {"v1_coalesced", launch_v1_coalesced, 1 << 30},
+        {"v2_smem_tiling", launch_v2_smem_tiling, 1 << 30},
     };
     std::vector<Kernel> kernels;
     for (auto& k : all)
@@ -120,38 +136,47 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(dA, hA.data(), nA * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB, hB.data(), nB * sizeof(float), cudaMemcpyHostToDevice));
 
-        // Runs warm-ups, checks the output (when ref != nullptr), then the timed reps.
-        // C is filled with 0xFF bytes (NaN) first, so a kernel that skips elements cannot
-        // pass on values left behind by a previous kernel.
-        auto measure = [&](const Launcher& f, const float* ref, double& err) {
+        // Runs warm-ups and copies the output to hC. C is filled with 0xFF bytes (NaN)
+        // first, so a kernel that skips elements cannot pass on values left behind by a
+        // previous kernel.
+        auto run_and_fetch = [&](const Launcher& f) {
             CUDA_CHECK(cudaMemset(dC, 0xFF, nC * sizeof(float)));
             for (int i = 0; i < std::max(warmup, 1); ++i) f(M, N, K, dA, dB, dC);
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
             CUDA_CHECK(cudaMemcpy(hC.data(), dC, nC * sizeof(float), cudaMemcpyDeviceToHost));
-            err = ref ? max_rel_err(hC.data(), ref, nC) : 0.0;
-            std::vector<float> t(reps);
-            for (int r = 0; r < reps; ++r) {
-                timer.start();
-                f(M, N, K, dA, dB, dC);
-                t[r] = timer.stop_ms();
-            }
-            CUDA_CHECK(cudaGetLastError());
-            return summarize(t);
+        };
+        auto time_one = [&](const Launcher& f) {
+            timer.start();
+            f(M, N, K, dA, dB, dC);
+            return timer.stop_ms();
         };
 
-        double err = 0.0;
-        TimingStats tc = measure(cublas, nullptr, err);
-        // Reference = cuBLAS output from its warm-up run (taken before its timed reps).
+        // Reference = cuBLAS output from its warm-up run; then its standalone timing.
+        run_and_fetch(cublas);
         hRef = hC;
-        const double cublas_gflops = flop / (tc.median_ms * 1e6);
-        rows.push_back({"cublas", M, N, K, tc, cublas_gflops, 100.0, 0.0, "REF"});
+        std::vector<float> tc(reps);
+        for (int r = 0; r < reps; ++r) tc[r] = time_one(cublas);
+        CUDA_CHECK(cudaGetLastError());
+        const TimingStats sc = summarize(tc);
+        rows.push_back({"cublas", M, N, K, sc, flop / (sc.median_ms * 1e6), 100.0, 0.0, "REF",
+                        NAN});
 
         for (auto& k : kernels) {
-            TimingStats t = measure(k.launch, hRef.data(), err);
-            const double g = flop / (t.median_ms * 1e6);
-            rows.push_back({k.name, M, N, K, t, g, 100.0 * g / cublas_gflops, err,
-                            (err <= tol) ? "PASS" : "FAILED"});
+            if (S > k.max_size) continue;
+            run_and_fetch(k.launch);
+            const double err = max_rel_err(hC.data(), hRef.data(), nC);
+            // Interleaved: kernel, cuBLAS, kernel, cuBLAS, ... (see PAIRED cuBLAS TIMING).
+            std::vector<float> tk(reps), tp(reps);
+            for (int r = 0; r < reps; ++r) {
+                tk[r] = time_one(k.launch);
+                tp[r] = time_one(cublas);
+            }
+            CUDA_CHECK(cudaGetLastError());
+            const TimingStats st = summarize(tk), sp = summarize(tp);
+            rows.push_back({k.name, M, N, K, st, flop / (st.median_ms * 1e6),
+                            100.0 * sp.median_ms / st.median_ms, err,
+                            (err <= tol) ? "PASS" : "FAILED", sp.median_ms});
         }
 
         CUDA_CHECK(cudaFree(dA));
@@ -180,11 +205,15 @@ int main(int argc, char** argv) {
 
     FILE* f = std::fopen(csv_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", csv_path.c_str()); return 1; }
-    std::fprintf(f, "kernel,M,N,K,median_ms,min_ms,p90_ms,gflops,pct_cublas,max_rel_err,status\n");
-    for (auto& r : rows)
-        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.3f,%.3f,%.3e,%s\n", r.kernel.c_str(), r.M,
+    std::fprintf(f, "kernel,M,N,K,median_ms,min_ms,p90_ms,gflops,pct_cublas,max_rel_err,status,"
+                    "cublas_paired_median_ms\n");
+    for (auto& r : rows) {
+        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.3f,%.3f,%.3e,%s,", r.kernel.c_str(), r.M,
                      r.N, r.K, r.t.median_ms, r.t.min_ms, r.t.p90_ms, r.gflops, r.pct_cublas,
                      r.err, r.status.c_str());
+        if (std::isnan(r.cublas_paired_ms)) std::fprintf(f, "\n");
+        else std::fprintf(f, "%.6f\n", r.cublas_paired_ms);
+    }
     std::fclose(f);
 
     f = std::fopen(env_path.c_str(), "w");

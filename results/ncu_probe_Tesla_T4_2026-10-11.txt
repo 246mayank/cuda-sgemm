@@ -1,0 +1,32 @@
+==PROF== Connected to process 7576 (/content/cuda-sgemm/bench)
+==PROF== Profiling "sgemm_v0_naive": 0%....50%....100% - 1 pass
+==PROF== Profiling "sgemm_v0_naive": 0%....50%....100% - 1 pass
+GPU: Tesla T4  SMs: 40  cc 7.5  max SM clock 1590 MHz  CUDA runtime 13000  driver 13000
+cuBLAS 130101
+
+kernel          size  median_ms     min_ms     p90_ms   GFLOP/s  %cuBLAS max_rel_err status
+cublas          2048     6.2548     6.2548     6.2548    2746.7    100.0   0.00e+00 REF
+v0_naive        2048   781.4320   781.4320   781.4320      22.0      0.8   2.36e-06 PASS
+
+--no-write: no files written
+==PROF== Disconnected from process 7576
+[7576] bench@127.0.0.1
+  <unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *) (64, 64, 1)x(32, 32, 1), Context 1, Stream 7, Device 0, CC 7.5
+    Section: Command line profiler metrics
+    --------------------- ----------- ------------
+    Metric Name           Metric Unit Metric Value
+    --------------------- ----------- ------------
+    dram__bytes_read.sum        Gbyte         2.24
+    dram__bytes_write.sum       Mbyte        21.42
+    --------------------- ----------- ------------
+
+  <unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *) (64, 64, 1)x(32, 32, 1), Context 1, Stream 7, Device 0, CC 7.5
+    Section: Command line profiler metrics
+    --------------------- ----------- ------------
+    Metric Name           Metric Unit Metric Value
+    --------------------- ----------- ------------
+    dram__bytes_read.sum        Gbyte         2.24
+    dram__bytes_write.sum       Mbyte        21.03
+    --------------------- ----------- ------------
+
+ncu exit code: 0
