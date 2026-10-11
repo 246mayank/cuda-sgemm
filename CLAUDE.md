@@ -37,8 +37,9 @@ benchmarking tools to measure performance, validate improvements, and explain re
 ```
 src/
   kernels/
-    v0_naive.cu            one thread per C element, uncoalesced access to B
-    v1_coalesced.cu        remap threads so a warp reads contiguous memory
+    v0_naive.cu            one thread per C element; threadIdx.x -> row, so A loads and C stores are
+                           uncoalesced (B is a warp-wide broadcast)
+    v1_coalesced.cu        threadIdx.x -> col: B loads and C stores contiguous, A broadcast
     v2_smem_tiling.cu      32x32 shared-memory tiles, __syncthreads between phases
     v3_1d_blocktiling.cu   each thread computes a column of TM outputs (register reuse)
     v4_2d_blocktiling.cu   each thread computes a TMxTN outer-product tile

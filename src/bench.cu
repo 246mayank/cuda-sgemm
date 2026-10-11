@@ -22,21 +22,11 @@
 #include "common.h"
 #include "kernels/kernels.h"
 
-#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <functional>
 #include <random>
 #include <string>
-
-#ifdef _WIN32
-#define popen _popen
-#define pclose _pclose
-#endif
-
-#ifndef ARCH_STR
-#define ARCH_STR "unknown"
-#endif
 
 namespace {
 
@@ -54,44 +44,6 @@ struct Row {
     double gflops, pct_cublas, err;
     std::string status;
 };
-
-std::string run_cmd(const char* cmd) {
-    std::string out;
-    FILE* p = popen(cmd, "r");
-    if (!p) return "unavailable";
-    char buf[512];
-    while (std::fgets(buf, sizeof buf, p)) out += buf;
-    pclose(p);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-    return out.empty() ? "unavailable" : out;
-}
-
-std::string json_str(const std::string& s) {
-    std::string o = "\"";
-    for (char c : s) {
-        if (c == '"' || c == '\\') { o += '\\'; o += c; }
-        else if (c == '\n') o += "\\n";
-        else if ((unsigned char)c < 0x20) o += ' ';
-        else o += c;
-    }
-    return o + "\"";
-}
-
-std::string sanitize(const std::string& s) {
-    std::string o;
-    for (char c : s) o += (std::isalnum((unsigned char)c) ? c : '_');
-    return o;
-}
-
-int dev_attr(cudaDeviceAttr a, int dev) {
-    int v = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&v, a, dev));
-    return v;
-}
-
-const char* NVSMI_QUERY =
-    "nvidia-smi --query-gpu=name,driver_version,pstate,clocks.sm,clocks.mem,clocks.max.sm,"
-    "clocks.max.mem,temperature.gpu,power.draw,power.limit --format=csv 2>&1";
 
 }  // namespace
 
@@ -117,29 +69,16 @@ int main(int argc, char** argv) {
     if (reps < 1) { std::fprintf(stderr, "--reps must be >= 1\n"); return 1; }
 
     // ---------------------------------------------------------------- environment
-    const int dev = 0;
-    CUDA_CHECK(cudaSetDevice(dev));
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
-    int rt_ver = 0, drv_ver = 0, cublas_ver = 0;
-    CUDA_CHECK(cudaRuntimeGetVersion(&rt_ver));
-    CUDA_CHECK(cudaDriverGetVersion(&drv_ver));
+    const DeviceEnv env = query_device(0);
+    print_device(env);
+    const std::string nvsmi_start = nvidia_smi_snapshot();
 
+    int cublas_ver = 0;
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     CUBLAS_CHECK(cublasGetVersion(handle, &cublas_ver));
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
-
-    char date[32], stamp[32];
-    std::time_t now = std::time(nullptr);
-    std::strftime(date, sizeof date, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
-    std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H%M%S", std::gmtime(&now));
-    const std::string gpu = sanitize(prop.name);
-    const std::string nvsmi_start = run_cmd(NVSMI_QUERY);
-
-    std::printf("GPU: %s  SMs: %d  cc %d.%d  CUDA runtime %d  driver %d  cuBLAS %d\n",
-                prop.name, prop.multiProcessorCount, prop.major, prop.minor, rt_ver, drv_ver,
-                cublas_ver);
+    std::printf("cuBLAS %d\n", cublas_ver);
 
     // ---------------------------------------------------------------- kernels
     const float one = 1.f, zero = 0.f;
@@ -150,6 +89,7 @@ int main(int argc, char** argv) {
     };
     std::vector<Kernel> all = {
         {"v0_naive", launch_v0_naive},
+        {"v1_coalesced", launch_v1_coalesced},
     };
     std::vector<Kernel> kernels;
     for (auto& k : all)
@@ -219,7 +159,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(dC));
     }
 
-    const std::string nvsmi_end = run_cmd(NVSMI_QUERY);
+    const std::string nvsmi_end = nvidia_smi_snapshot();
     CUBLAS_CHECK(cublasDestroy(handle));
 
     // ---------------------------------------------------------------- report
@@ -235,8 +175,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const std::string csv_path = "results/sgemm_" + gpu + "_" + stamp + ".csv";
-    const std::string env_path = "results/env_" + gpu + "_" + stamp + ".json";
+    const std::string csv_path = "results/sgemm_" + env.gpu_tag + "_" + env.stamp + ".csv";
+    const std::string env_path = "results/env_" + env.gpu_tag + "_" + env.stamp + ".json";
 
     FILE* f = std::fopen(csv_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", csv_path.c_str()); return 1; }
@@ -250,26 +190,9 @@ int main(int argc, char** argv) {
     f = std::fopen(env_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s\n", env_path.c_str()); return 1; }
     std::fprintf(f, "{\n");
-    std::fprintf(f, "  \"date_utc\": %s,\n", json_str(date).c_str());
-    std::fprintf(f, "  \"gpu_name\": %s,\n", json_str(prop.name).c_str());
-    std::fprintf(f, "  \"compute_capability\": \"%d.%d\",\n", prop.major, prop.minor);
-    std::fprintf(f, "  \"sm_count\": %d,\n", prop.multiProcessorCount);
-    std::fprintf(f, "  \"sm_clock_max_khz\": %d,\n", dev_attr(cudaDevAttrClockRate, dev));
-    std::fprintf(f, "  \"mem_clock_max_khz\": %d,\n", dev_attr(cudaDevAttrMemoryClockRate, dev));
-    std::fprintf(f, "  \"mem_bus_width_bits\": %d,\n", dev_attr(cudaDevAttrGlobalMemoryBusWidth, dev));
-    std::fprintf(f, "  \"global_mem_bytes\": %zu,\n", prop.totalGlobalMem);
-    std::fprintf(f, "  \"l2_cache_bytes\": %d,\n", prop.l2CacheSize);
-    std::fprintf(f, "  \"smem_per_sm_bytes\": %zu,\n", prop.sharedMemPerMultiprocessor);
-    std::fprintf(f, "  \"smem_per_block_optin_bytes\": %zu,\n", prop.sharedMemPerBlockOptin);
-    std::fprintf(f, "  \"regs_per_sm\": %d,\n", prop.regsPerMultiprocessor);
-    std::fprintf(f, "  \"max_threads_per_sm\": %d,\n", prop.maxThreadsPerMultiProcessor);
-    std::fprintf(f, "  \"cuda_runtime_version\": %d,\n", rt_ver);
-    std::fprintf(f, "  \"cuda_driver_version\": %d,\n", drv_ver);
+    write_env_fields(f, env);
     std::fprintf(f, "  \"cublas_version\": %d,\n", cublas_ver);
     std::fprintf(f, "  \"cublas_math_mode\": \"CUBLAS_DEFAULT_MATH\",\n");
-    std::fprintf(f, "  \"nvcc_version\": \"%d.%d.%d\",\n", __CUDACC_VER_MAJOR__,
-                 __CUDACC_VER_MINOR__, __CUDACC_VER_BUILD__);
-    std::fprintf(f, "  \"compiled_arch\": %s,\n", json_str(ARCH_STR).c_str());
     std::fprintf(f, "  \"warmup_runs\": %d,\n", warmup);
     std::fprintf(f, "  \"timed_runs\": %d,\n", reps);
     std::fprintf(f, "  \"tolerance_max_rel_err\": %g,\n", tol);

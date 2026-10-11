@@ -30,3 +30,6 @@ results.zip
 .claude/settings.local.json
 
 # NOTE: results/*.csv, results/*.json and figures/*.png are committed deliberately.
+
+# Personal planning notes (resume/application details): never publish
+docs/NVIDIA PS-II*

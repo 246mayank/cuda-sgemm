@@ -4,3 +4,4 @@
 #pragma once
 
 void launch_v0_naive(int M, int N, int K, const float* A, const float* B, float* C);
+void launch_v1_coalesced(int M, int N, int K, const float* A, const float* B, float* C);
