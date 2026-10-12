@@ -7,9 +7,13 @@ instruction mix. **Every number in this README is generated from the CSVs in
 [`results/`](results/)** by [`scripts/make_tables.py`](scripts/make_tables.py); none is typed
 by hand.
 
-**Result.** The fastest kernel at N = 4096, {{best_kernel:4096}}, reaches **{{best_gflops:4096}}
-GFLOP/s, {{best_pct:4096}} of cuBLAS** timed in the same thermal state. At N = 2048 the fastest is
-{{best_kernel:2048}} ({{best_pct:2048}}), {{best_speedup_vs:v0_naive:2048}} the naive kernel. All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
+**Result.** The best FP32 kernel, {{best_kernel:4096}}, reaches **{{best_pct:4096}} of cuBLAS at
+N = 4096** ({{best_gflops:4096}} GFLOP/s), and **{{pct:v9_autotuned:256}} of cuBLAS at N = 256**, where
+it beats cuBLAS. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
+GFLOP/s on a power-capped T4 depends on how hot the GPU was at the time. At N = 2048 the best,
+{{best_kernel:2048}} ({{best_pct:2048}}), is {{best_speedup_vs:v0_naive:2048}} the naive kernel. A
+separate FP16 **tensor-core** track reaches **{{tc_tflops:tc1_wmma_smem:2048}} TFLOP/s**
+({{tc_pct:tc1_wmma_smem:2048}} of `cublasGemmEx`). All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
 (largest normwise relative error {{maxerr}}, tolerance {{tol}}), including the non-multiple
 sizes 1000 and 1023.
 
@@ -323,15 +327,70 @@ v2's static shared-loads-per-FMA ratio ({{sass:v2_smem_tiling:LDS}} loads for
 {{sass:v2_smem_tiling:FFMA}} FMAs) matches the dynamic ratio ncu measured
 ({{lds_per_ffma:v2_smem_tiling}}).
 
+### v9: autotuned dispatch ([`v9_autotuned.cu`](src/kernels/v9_autotuned.cu))
+
+v9 adds no new device code. [`scripts/gen_dispatch.py`](scripts/gen_dispatch.py) reads the tuning
+CSV ({{dispatch_source}}) and writes a table: for each tuned size, the configuration with the best
+% of cuBLAS among those that passed everywhere. At run time v9 picks the entry closest to the
+problem size. The choices it makes:
+- {{dispatch:256}} at N = 256;
+- {{dispatch:1024}} at N = 1024;
+- {{dispatch:4096}} at N = 4096.
+
+Because the best of many noisy measurements is biased upward, v9 is **measured again in its own
+benchmark run**, and only that number is reported:
+- **{{pct:v9_autotuned:4096}} of cuBLAS at N = 4096**, {{pspeedup:v9_autotuned:v7_conflict_free:4096}}
+  vs v7;
+- **{{pct:v9_autotuned:256}} at N = 256**, where it beats cuBLAS ({{gflops:v9_autotuned:256}} vs
+  {{gflops:cublas:256}} GFLOP/s).
+**Winner's-curse check.** At N = 4096 the independent measurement
+({{pct:v9_autotuned:4096}}) matches what the tuning run recorded for that configuration
+({{dispatch_pct:4096}}). At N = 256 it comes in lower ({{pct:v9_autotuned:256}} vs
+{{dispatch_pct:256}}): small kernels take tens of microseconds, so their measurements are
+noisier, and picking the best of 18 of them inflates the winner the most. v9 still beats cuBLAS
+there. At N = 1024 the dispatched configuration ({{pct:v9_autotuned:1024}}) is slightly below the
+default v7 ({{pct:v7_conflict_free:1024}}) in this run, for the same reason.
+
+### Tensor-core track (separate precision)
+
+The FP32 series above multiplies FP32 inputs on the FP32 units. A T4 also has **tensor cores**:
+8 per SM, each doing a 4×4×4 FP16 matrix multiply-accumulate per clock. That's 8× the SM's FP32
+FMA rate. They're programmed through WMMA (`<mma.h>`): a warp loads 16×16 "fragments" of A and B
+and issues `mma_sync`.
+
+This is a different numerical problem: A and B are rounded to FP16, accumulation stays FP32. So
+this track is **verified and timed against `cublasGemmEx` with the same FP16 inputs**, never
+against SGEMM, and it never appears in the FP32 tables. Two kernels:
+- [`tc0_wmma_naive.cu`](src/kernels/tc0_wmma_naive.cu): one warp per 16×16 output tile, with
+  fragments loaded straight from global memory. This is v1's problem again: no reuse.
+- [`tc1_wmma_smem.cu`](src/kernels/tc1_wmma_smem.cu): a 128×128 block tile staged in shared
+  memory, with rows padded 8 halves to spread banks. Each of 8 warps owns 64×32 = 4×2 fragments.
+
+{{table:tc}}
+
+At N = 4096, `tc1` runs **{{tc_speedup:tc1_wmma_smem:tc0_wmma_naive:4096}} faster than `tc0`** and
+{{tc_vs_fp32:tc1_wmma_smem:4096}} the throughput of the fastest FP32 kernel, at
+{{tc_pct:tc1_wmma_smem:4096}} of `cublasGemmEx`.
+The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
+- **`tc0`** moves {{tcdram_mb:tc0_wmma_naive}} MB through DRAM, and its tensor pipe is busy only
+  {{tcpipe:tc0_wmma_naive}} of the time: the tensor cores mostly wait for data.
+- **`tc1`** stages tiles in shared memory, cutting traffic to {{tcdram_mb:tc1_wmma_smem}} MB, and
+  the tensor pipe is busy {{tcpipe:tc1_wmma_smem}} of the time.
+- **The remaining gap to `cublasGemmEx`:** one shared buffer with two barriers per K step (no
+  double buffering), and fragment loads through generic shared loads instead of `ldmatrix`.
+- **Precision cost of FP16 inputs** (vs FP32 SGEMM on the same data): {{tc_prec:2048}} normwise
+  relative error at N = 2048. That's acceptable for many workloads, but not interchangeable with
+  SGEMM.
+
 ### What still separates the best kernel from cuBLAS
 
 - **The clock.** The fastest single timed run of each kernel at N = 4096 is far above its
   median; the T4 throttles to stay within {{power_limit}} (table in Methodology).
-- **Occupancy.** 64 accumulators per thread cap v4–v8 at {{occ:v4_2d_blocktiling}} theoretical
-  occupancy.
-- **Tile choice per size.** One fixed 128×128 tile is wrong for small N and not optimal for large
-  N; the tuning study above quantifies by how much. A dispatcher that picks the measured best
-  tile per size is the natural next step.
+- **Occupancy.** 64 accumulators per thread cap the 8×8-per-thread kernels at
+  {{occ:v4_2d_blocktiling}} theoretical occupancy; the tuning winner gets 3 blocks per SM by
+  using 128-thread blocks.
+- **What cuBLAS-class kernels add:** per-architecture hand-tuned SASS, larger K pipelines, and
+  heuristics over many more shapes than 18.
 
 ## Methodology
 

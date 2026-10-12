@@ -1,0 +1,13 @@
+==PROF== Connected to process 14044 (/content/cuda-sgemm/bench)
+==PROF== Disconnected from process 14044
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","dram__bytes_read.sum","byte","221,155,744"
+"0","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","gpu__time_duration.sum","ns","29,167,136"
+"0","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_sector_hit_rate.pct","%","99.14"
+"0","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum","sector","1,104,079,516"
+"0","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","lts__t_sector_hit_rate.pct","%","83.24"
+"1","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","dram__bytes_read.sum","byte","220,757,632"
+"1","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","gpu__time_duration.sum","ns","29,157,152"
+"1","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_sector_hit_rate.pct","%","99.14"
+"1","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum","sector","1,104,079,497"
+"1","14044","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","lts__t_sector_hit_rate.pct","%","83.23"

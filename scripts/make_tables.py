@@ -105,8 +105,18 @@ class Data:
             raise Missing(f"{k} at N={n} FAILED the check")
         return r
 
+    def ncu_key(self, k):
+        """v9 has no kernel of its own: under ncu it runs as the config it dispatches to at NCU_N."""
+        if k == "v9_autotuned":
+            try:
+                return self.scalar("dispatch", [str(NCU_N)]).strip("`")
+            except Missing:
+                return k
+        return k
+
     def ncu_val(self, kind, metric, k):
         t = self.ncu.get(kind)
+        k = self.ncu_key(k)
         if t is None or k not in t.index or metric not in t.columns or pd.isna(t.loc[k, metric]):
             raise Missing(f"ncu {kind} {metric} for {k}")
         return float(t.loc[k, metric])
@@ -307,6 +317,35 @@ class Data:
             if "duration" in args[0]:
                 return f"{v / 1e6:.1f} ms"
             return f"{v / 1e6:,.1f} M"
+        if name == "dispatch_source":  # which tuning CSV v9's table was generated from
+            inc = ROOT / "src" / "kernels" / "v9_dispatch_table.inc"
+            m = re.search(r"results/(\S+\.csv)", inc.read_text(encoding="utf-8")) if inc.exists() else None
+            if not m:
+                raise Missing("v9_dispatch_table.inc")
+            return f"`results/{m.group(1)}`"
+        if name in ("tcpipe", "tcdram_mb"):  # tensor-core ncu counters at N = 2048
+            kind = "tcpipe" if name == "tcpipe" else "tcdram"
+            t, _ = load_ncu(kind)
+            if t is None or args[0] not in t.index:
+                raise Missing(f"ncu {kind} for {args[0]}")
+            r = t.loc[args[0]]
+            if name == "tcpipe":
+                return f"{r['sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active']:.1f}%"
+            return f"{(r['dram__bytes_read.sum'] + r['dram__bytes_write.sum']) / 1e6:,.0f}"
+        if name == "dispatch_pct":  # {{dispatch_pct:N}} the tuning-run % recorded in the table
+            inc = ROOT / "src" / "kernels" / "v9_dispatch_table.inc"
+            for line in inc.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'\{(\d+), "[^"]+"\},\s*//\s*([\d.]+)%', line)
+                if m and int(m.group(1)) == int(args[0]):
+                    return f"{float(m.group(2)):.1f}%"
+            raise Missing(f"dispatch pct for N={args[0]}")
+        if name == "dispatch":  # {{dispatch:N}} config v9 uses at size N
+            inc = ROOT / "src" / "kernels" / "v9_dispatch_table.inc"
+            for line in inc.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'\{(\d+), "([^"]+)"\}', line)
+                if m and int(m.group(1)) == int(args[0]):
+                    return f"`{m.group(2)}`"
+            raise Missing(f"dispatch entry for N={args[0]}")
         if name == "conflicts_per_lds":  # {{conflicts_per_lds:K}}
             c = self.ncu_val("smem", "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum", args[0])
             return f"{c / self.ncu_val('smem', 'smsp__inst_executed_op_shared_ld.sum', args[0]):.1f}"
@@ -427,7 +466,7 @@ class Data:
             raise Missing("ncu_dram_*.csv")
         rows = []
         for k in kernels_in(self.df):
-            if k not in self.ncu["dram"].index:
+            if self.ncu_key(k) not in self.ncu["dram"].index:
                 continue
             cells = [kname(k)]
             for tok in ("dram_mb", "traffic_x", "ai", "sectors_per_req", "l1hit", "l2hit",

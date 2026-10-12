@@ -86,7 +86,7 @@ def label_line_ends(ax, ends, min_ratio=1.22):
 def gflops_vs_size(df, env, csv_path):
     ok = passing(df)
     sizes = sorted(s for s in ok.M.unique() if s & (s - 1) == 0)  # powers of two only
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+    fig, ax = plt.subplots(figsize=(9, 6.3))
 
     ref = ok[(ok.kernel == "cublas") & ok.M.isin(sizes)].sort_values("M")
     ax.plot(ref.M, ref.gflops, color=REF, lw=2, ls="--", marker="o", ms=5, label="cuBLAS")
@@ -108,7 +108,7 @@ def gflops_vs_size(df, env, csv_path):
     ax.set_ylabel("GFLOP/s (log scale)")
     ax.set_title("SGEMM throughput vs size", loc="left", fontsize=13, color=INK, pad=18)
     ax.text(0, 1.01, subtitle(env, csv_path), transform=ax.transAxes, fontsize=8, color=INK2)
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.13), ncol=4, fontsize=9)
     fig.text(0.99, 0.01, omitted_note(kernels_in(ok)), ha="right", fontsize=8, color=INK2)
     failure_note(fig, df)
     fig.tight_layout()
