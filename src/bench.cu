@@ -192,7 +192,8 @@ int main(int argc, char** argv) {
     }
     if (tune) {
         all.clear();
-        for (const auto* list : {&v7_tune_configs(), &v8_tune_configs(), &v10_tune_configs()})
+        for (const auto* list : {&v7_tune_configs(), &v8_tune_configs(), &v10_tune_configs(),
+                                  &v13_tune_configs()})
             for (const TuneConfig& c : *list) all.push_back({c.name, c.launch, c.resources, 1 << 30});
         if (!prefix_set) prefix = "tune_";
     }

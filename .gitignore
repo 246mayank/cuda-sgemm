@@ -34,3 +34,6 @@ results.zip
 # Personal planning notes (resume/application details): never publish
 docs/NVIDIA PS-II*
 reduce
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/
