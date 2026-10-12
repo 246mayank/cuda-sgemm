@@ -8,10 +8,11 @@ covers four things:
 3. what our measurements showed;
 4. the interview questions you're likely to get, with short model answers.
 
-**Every number here comes from `results/*.csv` or the generated `README.md`** (final run
-`sgemm_Tesla_T4_2026-10-12_112528.csv`, Nsight Compute files `ncu_*_2026-10-12_112602.csv`).
-Anything about v7, the tuning study or SASS is marked **pending Colab run 5** until that run
-exists.
+**Every number here comes from `results/*.csv` or the generated `README.md`.** v0–v6 numbers
+in sections 1–4 come from the earlier run `sgemm_Tesla_T4_2026-10-12_112528.csv`. v7, v8, the
+tuning study, SASS, the set-conflict test and the clock-locked run come from
+`sgemm_Tesla_T4_2026-10-12_153929.csv` and the `*_2026-10-12_154*` files. Anything about v9 or
+the tensor-core kernels is marked **pending Colab run 7** until that run exists.
 
 Quick reminders about the T4 (sm_75), from `results/env_*.json`:
 
@@ -193,7 +194,8 @@ the loads I changed weren't on the critical path."
 - **What breaks vectorized loads?** Misalignment (sizes not a multiple of 4, odd offsets),
   which forces a scalar fallback.
 - **How did you know the compiler already vectorized v4?** The shared-load-instruction counter
-  per FFMA matched v5 exactly. SASS would show `LDS.U.128` directly (pending Colab run 5).
+  per FFMA matched v5 exactly, and the SASS dump confirms it: all 32 of v4's shared loads are
+  `LDS.128`, even though its C++ source reads scalars.
 - **Why transpose A in shared memory?** So that one thread's 8 A values for a given k are
   contiguous, which makes them readable with 128-bit loads.
 
@@ -300,8 +302,16 @@ are 4 × 128 = 512 floats apart, and 512 % 32 = 0, so they hit the same bank.
 3. Bonus: each thread's 4 output columns are now contiguous, so C is written with 128-bit
    stores.
 
-**Result: pending Colab run 5.** The prediction is that both conflict counters drop to 0. The
-GFLOP/s gain depends on whether conflicts or the clock is the binding limit.
+**Result (measured):**
+- Shared-load bank conflicts fell from **33,554,432 to 14,653** at N = 2048, a **2,290x** drop.
+  Store conflicts fell from 2,097,152 to 130,291.
+- v7 reaches **81.9% of cuBLAS at N = 4096** (3,177 GFLOP/s), a **1.39x** throttle-normalised
+  speedup over v6. It's the biggest single step since v4.
+- Nothing else moved: shared loads per FMA (0.062) and FFMA share (87%) are the same as v6, and
+  DRAM traffic only dips (207 → 184 MB). The gain is purely that each shared load now takes one
+  pass instead of three.
+- The analytical model (section 14) predicted **exactly 0**. ncu shows a small residual (0.04%
+  of v6's count) that the model doesn't explain. Report it; don't round it to zero.
 
 ### Interview questions
 - **What is a bank conflict?** Two threads of the same request accessing different addresses
@@ -345,7 +355,18 @@ If you measure 12 noisy configurations and pick the fastest, the winner's number
 upward, because part of why it won is luck. The honest fixes: re-measure the chosen
 configuration in a separate run, or report the spread across configs.
 
-**Results: pending Colab run 5.**
+**Results (measured, `results/tune_sgemm_Tesla_T4_2026-10-12_154334.csv`, 126 of 126
+config/size results pass):**
+- **Large N:** the best config is `v7_64x128x8_8x8` (128 threads, 3 blocks/SM) at **88.6% of
+  cuBLAS at N = 4096** (87.8% at 2048). The default 128×128 tile gets 82.6% in the same run.
+  More resident blocks beat a bigger tile here.
+- **Small N:** at N = 256, small tiles **beat cuBLAS outright**. Best is `v7_64x64x8_4x4` at
+  126.5%; three other small-tile configs also exceed 100%. The default tile makes 0.1 waves
+  there, so most SMs sit idle.
+- **BK = 16 is consistently worse** (e.g. 72% vs 83% at N = 4096 for 128×128). Doubling shared
+  memory per block cuts resident blocks more than halving the barriers helps.
+- These are best-of-18 numbers, so they carry the winner's curse (see section 16). That's why
+  v9 is re-measured independently.
 
 ### Interview questions
 - **Why templates rather than runtime parameters?** Full unrolling, and register-resident
@@ -386,9 +407,14 @@ Because our inner loops are fully unrolled, the static mix of the loop body mirr
 ratio.
 
 ### In our project
-The plan is to dump SASS on Colab and count opcodes per kernel. The key check is whether v4
-(scalar C++ source) contains `LDS.U.128`, which would directly prove the explanation for v5's
-null result. **Pending Colab run 5.**
+`cuobjdump -sass bench`, with opcodes counted per kernel (README "What the compiler actually
+emitted"). Measured, static counts:
+- **v4:** 32 shared loads, all 32 of them `LDS.128`, from scalar C++. That is the direct proof
+  behind v5's null result.
+- **v5:** where `LDG.128` (128-bit global loads) first appears.
+- **v7:** writes C with 16 `STG.128` stores.
+- **v2:** 40 `LDS` (8 of them `.128`) for 32 `FFMA`, a static ratio of 1.25 that matches the
+  1.250 shared loads per FMA ncu measured at run time.
 
 ### Interview questions
 - **Difference between PTX and SASS?** PTX is a virtual, forward-compatible IR; SASS is the
@@ -471,10 +497,26 @@ Measured:
 | L2 hit rate | 83.3% | 82.9% |
 | Global load sectors | 1,104.1 M | 1,107.3 M |
 
-So it isn't misses: the same hits are simply served slower. The **hypothesis** is
-serialization from L1 set conflicts (the tag-lookup stage). The confirming counter is the L1
-t-stage set-conflict metric (`l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld`).
-**Pending Colab run 5.** Until then, say "hypothesis".
+So it isn't misses: the same hits are simply served slower. The first **hypothesis** was
+serialization from L1 set conflicts in the tag-lookup stage. We measured the counter that
+tests it (`l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld`), and **the data refutes it**:
+
+| | N = 1023 | N = 1024 |
+|---|---|---|
+| L1 tag-stage set conflicts | 262.3 M | 234.9 M |
+| kernel time (ncu) | 29.1 ms | 96.2 ms |
+
+The *faster* size has *more* set conflicts. So set conflicts aren't the cause.
+
+**What's left (untested):** contention for L2 slices or DRAM channels ("partition camping").
+Memory is address-interleaved across slices and channels, and a 4 KB power-of-two stride can
+send every request of a warp to the same one. None of the counters we collected isolates that.
+
+**Why a refuted hypothesis is a strength in an interview.** It shows the scientific loop
+interviewers look for: observe, hypothesize, pick the counter that could prove you wrong,
+measure, update. Saying "I thought X; I measured the counter that tests X; it disagreed; here's
+what's left" is more credible than a confident story nobody checked. It also shows you know the
+difference between "consistent with" and "confirmed".
 
 ### Interview questions
 - **Why do power-of-two sizes often run slower?** Strided accesses alias into the same cache
@@ -516,8 +558,10 @@ depends on temperature and on what ran just before.
 
 **Clock locking.** `nvidia-smi -lgc <min>,<max>` pins the clock, which is how professional
 benchmarks get stable numbers. It needs administrator rights on the GPU, which cloud
-notebooks often don't grant. The attempt is **pending Colab run 5**, and the outcome gets
-recorded either way.
+notebooks often don't grant. **Colab allowed it** (`results/clock_lock_2026-10-12_154252.txt`),
+so the whole benchmark was rerun with the clock locked at 900 MHz. The relative results held:
+v7 got **82.5% of cuBLAS at N = 4096 locked vs 81.9% unlocked**. At N = 4096 the power cap still
+pulled the clock below the lock, because a clock lock can't override the 70 W limit.
 
 ### Interview questions
 - **Why not just report the best run?** It's not sustainable throughput; under a power cap the
@@ -568,19 +612,28 @@ mostly *stalls* (conflicts, latency, a throttled clock), not wasted instructions
 - **v5 vectorized:** `float4` loads and transposed A. A null result (1.00x), because the
   compiler had already vectorized v4 and global loads were off the critical path.
 - **v6 double-buffered:** prefetches the next tile during the math with one barrier per tile.
-  1.04x; the best measured kernel at 60.4% of cuBLAS at N = 4096.
-- **v7 conflict-free:** a fragment remap plus padding 128 → 132, targeting 0 bank conflicts.
-  Pending Colab run 5.
-- **v8 warp tiling:** block tile → warp tile (64×32) → thread tile (2×2 pieces of 4×4). A warp
-  requests 96 distinct shared floats per k instead of 144. Pending Colab run.
+  1.04x; about 60% of cuBLAS at N = 4096.
+- **v7 conflict-free:** a fragment remap plus padding 128 → 132 cuts bank conflicts 2,290x
+  (33.5M → 14.7K) and gives a 1.39x speedup: **81.9% of cuBLAS at N = 4096** (3,177 GFLOP/s).
+- **v8 warp tiling:** block → warp (64×32) → thread tile; 96 instead of 144 distinct shared
+  floats per warp per k. 81.4% of cuBLAS (0.99x vs v7): no gain once the conflicts were gone.
+- **v9 autotuned:** dispatches each size to its best measured config from the tuning study
+  (table generated by `scripts/gen_dispatch.py`). Re-measured independently: pending Colab run 7.
+- **tc0 WMMA naive:** one warp per 16×16 tile on the tensor cores, FP16 in, FP32 accumulate,
+  fragments loaded straight from global memory. Pending Colab run 7.
+- **tc1 WMMA shared memory:** 128×128 block tile staged in padded shared memory, 8 warps of 64×32
+  (4×2 fragments each). Pending Colab run 7.
 
-### Five numbers to remember (final run, `results/`)
-1. **2,884 GFLOP/s = 60.4% of cuBLAS** at N = 4096 (v6); 63.4% at N = 2048.
-2. **50.6x** over naive at N = 2048.
-3. **48 of 48** kernel/size results pass the cuBLAS check (max relative error 2.2e-6).
-4. DRAM traffic **44.9x → 4.1x** the minimum (v0 → v6); measured bandwidth **234 GB/s**.
-5. **33,554,432 bank conflicts** (2 per shared-load instruction) in v4–v6, and the FFMA share
-   of instructions going from **22% to 87%**.
+### Five numbers to remember (`results/`, run of 2026-10-12 15:39 UTC unless noted)
+1. **3,177 GFLOP/s = 81.9% of cuBLAS** at N = 4096 (v7); 82.1% at N = 2048. That's **58.1x**
+   the naive kernel at N = 2048.
+2. **62 of 62** kernel/size results pass the cuBLAS check (max relative error 2.2e-6).
+3. Bank conflicts **33,554,432 → 14,653** (v6 → v7, 2,290x), predicted to the exact count for
+   v5/v6 by `scripts/bank_model.py`.
+4. Tuning study: **88.6% of cuBLAS** at N = 4096 (`v7_64x128x8_8x8`), and **126.5%** at N = 256
+   (small tiles beat cuBLAS). These are best-of-18 numbers.
+5. DRAM traffic **44.9x → 3.7x** the minimum (v0 → v7); measured bandwidth **235 GB/s**; FFMA
+   share of instructions **22% → 87%**.
 
 ---
 
@@ -617,6 +670,14 @@ Distinct floats one warp requests from shared memory per k step:
 Same FMAs, a third less shared-memory traffic. v7 is lopsided (16 vs 128) because a warp spans
 just 2 thread-rows but all 16 thread-columns. A square-ish warp tile balances the two.
 
+### What we measured
+v8 reaches **81.4% of cuBLAS at N = 4096 (0.99x vs v7)**: no gain. Shared loads per FMA
+(0.062), FFMA share (87%) and occupancy (50%) are identical to v7. The explanation that fits
+the data: once v7 removed the bank conflicts, shared-memory bandwidth stopped being the
+bottleneck. Asking for fewer distinct floats per warp then relieves a resource nobody was
+waiting on. This is another null result worth telling. On tensor-core GPUs warp tiling matters
+much more, because the warp tile is exactly what feeds the `mma` instructions (section 15).
+
 ### Interview questions
 - **Why tile at the warp level if each thread's loads are unchanged?** Shared-memory bandwidth
   is consumed per warp request, by distinct addresses. A compact warp tile turns more of each
@@ -648,7 +709,9 @@ one warp, group addresses into phases, and count the extra cycles.
 [`scripts/bank_model.py`](../scripts/bank_model.py) predicts **33,554,432** load conflicts and
 **2,097,152** store conflicts for v5 and v6 at N = 2048. Those are exactly the Nsight Compute
 counts. The scaling: 64 extra cycles per warp per tile × 8 warps × 256 tiles × 256 blocks. For
-v7 and v8 the model predicts 0, which run 5 tests.
+v7 and v8 the model predicts 0. ncu measured 14,653 (v7) and 27,469 (v8) load conflicts:
+0.04% and 0.08% of v6's count. The model explains 99.9%+ of the effect, and the residual is
+reported as unexplained, not rounded away.
 
 ### Interview questions
 - **How would you check a shared-memory layout before running it?** Write down each lane's
@@ -660,6 +723,139 @@ v7 and v8 the model predicts 0, which run 5 tests.
   multiple of 4, so float4 reads stay 16-byte aligned.
 - **Why don't broadcasts conflict?** The bank delivers one word per cycle to every lane that
   asked for that word, so many lanes reading one address cost one access.
+
+---
+
+## 15. Tensor cores and WMMA
+
+### The concept
+Tensor cores are separate matrix units inside each SM. On a T4 (Turing) each SM has **8 tensor
+cores**. Each computes a **4×4×4 FP16 matrix multiply-accumulate per clock**, i.e. 64 FMAs. All
+64 FP32 CUDA cores of an SM together also do 64 FMAs per clock, so the tensor cores give **8x
+the FMA rate** of the regular cores, but only for small matrix tiles with FP16 (or other
+low-precision) inputs.
+
+You don't program them per thread. A whole warp cooperates through the **WMMA** API
+(`#include <mma.h>`, namespace `nvcuda::wmma`):
+
+```
+wmma::fragment<wmma::matrix_a, 16,16,16, half, wmma::row_major> a;   // a 16x16 tile of A
+wmma::fragment<wmma::matrix_b, 16,16,16, half, wmma::row_major> b;
+wmma::fragment<wmma::accumulator, 16,16,16, float> acc;
+wmma::fill_fragment(acc, 0.f);
+wmma::load_matrix_sync(a, ptrA, ldA);   // the warp loads a 16x16 tile, stride ldA
+wmma::load_matrix_sync(b, ptrB, ldB);
+wmma::mma_sync(acc, a, b, acc);         // acc += a * b on the tensor cores (4096 FMAs)
+wmma::store_matrix_sync(ptrC, acc, ldC, wmma::mem_row_major);
+```
+
+A **fragment** is a tile distributed across the 32 lanes' registers in an *unspecified* layout.
+You never index it per element; you only load, multiply and store it as a whole.
+`row_major` / `col_major` tells the load how the tile sits in memory. Our A and B are
+row-major, so both use `row_major` fragments.
+
+**Rules that bite:**
+- `ldm` (the row stride) must be a multiple of 8 halves (16 bytes).
+- The pointer passed to `load/store_matrix_sync` must be **32-byte (256-bit) aligned**.
+- Matrix dimensions must be multiples of 16, or you handle the edges yourself. Our tc kernels
+  run only sizes that are multiples of 128.
+- `_sync` means every lane of the warp must call it together. Never put it behind a branch
+  that splits a warp.
+
+### Why FP16 inputs with FP32 accumulation
+FP16 has a 10-bit mantissa, so each *input* is rounded to about 3 significant digits. But the
+product of two FP16 numbers is exact in FP32, and summing thousands of them in FP32 avoids the
+catastrophic error FP16 accumulation would cause. This "mixed precision" is how deep-learning
+training uses tensor cores.
+
+### Why the reference is `cublasGemmEx` with the same FP16 inputs
+Correctness checks must compare like with like. Our tc kernels see FP16-rounded A and B, so
+comparing them to FP32 SGEMM would flag the *input rounding* as a kernel bug. The reference is
+therefore `cublasGemmEx(..., CUDA_R_16F inputs, CUDA_R_32F output, CUBLAS_COMPUTE_32F)` on the
+very same FP16 buffers, and "% of cuBLAS" means % of that call. The precision cost of FP16
+inputs (FP16-input result vs FP32 SGEMM on the same data) is measured *separately* and reported
+as a property of the format, not of our kernels (`results/tc_precision_*.csv`).
+
+### tc0 vs tc1 (`src/kernels/tc0_wmma_naive.cu`, `tc1_wmma_smem.cu`)
+- **tc0:** each warp owns one 16×16 tile of C and loads its A and B fragments **straight from
+  global memory** at every k step. That's the tensor-core equivalent of v1: no reuse, so the
+  tensor cores mostly wait for data.
+- **tc1:** a 128×128 block tile, 8 warps in a 2×4 grid, each warp owning 64×32 = 4×2 fragments
+  (8 accumulators). Per 32-deep k step, the block copies the A and B tiles into **shared
+  memory** with 16-byte vector loads. Each A fragment then feeds 2 MMAs and each B fragment 4.
+  Rows are **padded by 8 halves** (16 bytes = 4 banks), so the 16 rows a fragment load touches
+  don't land on the same banks. The padded strides (40, 136) keep the 32-byte alignment WMMA
+  needs.
+
+### What CUTLASS adds on top
+- **`ldmatrix`:** a dedicated instruction that loads fragments from shared memory in the exact
+  register layout the MMA wants, bank-conflict-free with a swizzled layout.
+- **Swizzled shared-memory layouts:** XOR-permuted addresses instead of padding, so no memory is
+  wasted.
+- **Multistage pipelines:** on Ampere and later, `cp.async` copies global → shared without
+  passing through registers, with 3–5 stages in flight. That's double buffering generalised.
+  Turing (our T4) has no `cp.async`.
+- **Raw `mma.sync` PTX** instead of WMMA, for full control of the fragment layout.
+
+### Results
+**Pending Colab run 7** (`bench --tc`): TFLOP/s and % of `cublasGemmEx` for tc0 and tc1, the
+FP16 precision cost, and tensor-pipe utilisation from ncu.
+
+### Interview questions
+- **Why can't you just compare the tensor-core kernel with SGEMM?** Different inputs: FP16
+  rounding changes the answer by roughly 1e-3 relative, which would look like a bug. Compare
+  with `cublasGemmEx` on the same FP16 inputs, and report the precision cost separately.
+- **What is a WMMA fragment?** A warp-wide, opaque, register-resident 16×16 tile. The layout is
+  implementation-defined, so you only load, mma and store it as a unit.
+- **Why does tc0 underperform?** No reuse: every warp reloads its fragments from global memory
+  every k step, so the tensor cores are starved, exactly like v1 for FP32.
+- **Why pad the shared tiles by 8 halves?** The fragment load reads 16 rows at the tile's
+  stride. With a 64- or 256-byte stride many rows map to the same banks; 16 bytes of padding
+  shifts each row by 4 banks while keeping 32-byte alignment and an `ldm` that's a multiple of 8.
+- **What would you do next on an A100?** `cp.async` multistage pipelines, `ldmatrix` with
+  swizzled layouts, larger warp tiles, and TF32 or BF16 tensor cores for FP32-like range.
+
+---
+
+## 16. Autotuned dispatch and the winner's curse (v9)
+
+### How the table is built
+1. `./bench --tune` measures 18 configurations of the v7/v8 templates at every size, each
+   verified against cuBLAS and timed with paired cuBLAS runs.
+2. [`scripts/gen_dispatch.py`](../scripts/gen_dispatch.py) reads the newest tuning CSV.
+   - It drops any configuration that failed the check at *any* size.
+   - For each tuned size it picks the config with the highest % of paired cuBLAS.
+   - It writes `src/kernels/v9_dispatch_table.inc`: lines like `{4096, "v7_64x128x8_8x8"}`,
+     with a comment naming the CSV.
+3. [`src/kernels/v9_autotuned.cu`](../src/kernels/v9_autotuned.cu) `#include`s the table. At
+   run time it computes s = cbrt(M·N·K), the side of the equivalent cube, and picks the entry
+   whose size is closest to s *in log scale*. N = 1023 maps to the 1023 entry, N = 3000 to 4096.
+
+No device code is new. v9 is a policy, the same idea as cuBLAS's internal heuristics and
+`cublasLt`'s algorithm selection (`cublasLtMatmulAlgoGetHeuristic`), which choose a kernel per
+problem shape. The difference is that our table comes from our own measurements on this GPU.
+
+### The winner's curse
+Each config's measured speed = true speed + noise. Pick the maximum of 18 noisy values and you
+preferentially pick configs whose noise happened to be positive. So **the winner's measured
+number overstates its true speed**, and the more configs you try, the bigger the bias. The fix
+is to re-measure the chosen configuration in an independent run and report only that number.
+That's why bench measures v9 again and the README quotes v9 only from that measurement.
+
+### Results
+**Pending Colab run 7.** The tuning run itself showed best-per-size values of 126.5% (N = 256)
+to 88.6% (N = 4096) of cuBLAS; expect v9's independent numbers to come in somewhat lower.
+
+### Interview questions
+- **Why not just use the best config everywhere?** No single tile wins at every size. Small N
+  needs small tiles to fill 40 SMs (wave quantization), and large N needs reuse and enough
+  resident blocks.
+- **What is the winner's curse here?** Selection bias: the max of noisy measurements is
+  optimistic, so you re-measure the winner independently.
+- **How does cuBLAS do this?** Internal heuristics pick a kernel per shape and GPU; cublasLt
+  exposes the candidates and their heuristic ranking, and you can benchmark them yourself.
+- **How would you handle non-square or new shapes?** Tune on a grid of (M, N, K) buckets, or fall
+  back to a cost model (waves × per-tile time) for shapes outside the grid.
 
 ---
 
