@@ -1,0 +1,6 @@
+kernel,regs_per_thread,local_bytes_per_thread,static_smem_bytes,threads_per_block,blocks_per_sm,warps_per_sm,max_warps_per_sm,theoretical_occupancy_pct
+v4_2d_blocktiling,128,0,8192,256,2,16,32,50.0
+v7_conflict_free,127,0,16640,256,2,16,32,50.0
+v9_autotuned,128,0,12544,128,4,16,32,50.0
+v11_splitk,128,0,12544,128,4,16,32,50.0
+v12_dispatch,128,0,12544,128,4,16,32,50.0
