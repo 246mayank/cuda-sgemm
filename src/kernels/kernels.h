@@ -21,3 +21,13 @@ KernelResources resources_v3_1d_blocktiling();
 KernelResources resources_v4_2d_blocktiling();
 KernelResources resources_v5_vectorized();
 KernelResources resources_v6_double_buffered();
+void launch_v7_conflict_free(int M, int N, int K, const float* A, const float* B, float* C);
+KernelResources resources_v7_conflict_free();
+
+// Tuning study (bench --tune): the v7 kernel instantiated with different tile shapes.
+struct TuneConfig {
+    const char* name;  // v7_<BM>x<BN>x<BK>_<TM>x<TN>
+    void (*launch)(int, int, int, const float*, const float*, float*);
+    KernelResources (*resources)();
+};
+const std::vector<TuneConfig>& v7_tune_configs();

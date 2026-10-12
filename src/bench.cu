@@ -23,6 +23,10 @@
 //                   the reference)
 //   --size 2048     run only this square size
 //   --no-write      print results but write no files (used for the Nsight Compute probe)
+//   --tune          run the v7 tuning study (12 tile shapes of the same kernel) instead of the
+//                   v0-v7 series; files get the prefix "tune_" unless --prefix is given
+//   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
+//                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
 // ROW-MAJOR vs COLUMN-MAJOR (the cuBLAS transpose trick)
 //   Our matrices are row-major; cuBLAS assumes column-major. A row-major MxN matrix has the
@@ -68,7 +72,8 @@ int main(int argc, char** argv) {
     std::string kernel_filter;
     int only_size = 0, warmup = 3, reps = 20;
     double tol = 1e-4;
-    bool write = true;
+    bool write = true, tune = false, prefix_set = false;
+    std::string prefix;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -81,6 +86,8 @@ int main(int argc, char** argv) {
         else if (a == "--reps") reps = std::atoi(next());
         else if (a == "--tol") tol = std::atof(next());
         else if (a == "--no-write") write = false;
+        else if (a == "--tune") tune = true;
+        else if (a == "--prefix") { prefix = next(); prefix_set = true; }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
     }
     if (reps < 1) { std::fprintf(stderr, "--reps must be >= 1\n"); return 1; }
@@ -112,7 +119,14 @@ int main(int argc, char** argv) {
         {"v4_2d_blocktiling", launch_v4_2d_blocktiling, resources_v4_2d_blocktiling, 1 << 30},
         {"v5_vectorized", launch_v5_vectorized, resources_v5_vectorized, 1 << 30},
         {"v6_double_buffered", launch_v6_double_buffered, resources_v6_double_buffered, 1 << 30},
+        {"v7_conflict_free", launch_v7_conflict_free, resources_v7_conflict_free, 1 << 30},
     };
+    if (tune) {
+        all.clear();
+        for (const TuneConfig& c : v7_tune_configs())
+            all.push_back({c.name, c.launch, c.resources, 1 << 30});
+        if (!prefix_set) prefix = "tune_";
+    }
     std::vector<Kernel> kernels;
     for (auto& k : all)
         if (kernel_filter.empty() || k.name.rfind(kernel_filter, 0) == 0) kernels.push_back(k);
@@ -194,10 +208,10 @@ int main(int argc, char** argv) {
     CUBLAS_CHECK(cublasDestroy(handle));
 
     // ---------------------------------------------------------------- report
-    std::printf("\n%-14s %5s %10s %10s %10s %9s %8s %10s %s\n", "kernel", "size", "median_ms",
+    std::printf("\n%-22s %5s %10s %10s %10s %9s %8s %10s %s\n", "kernel", "size", "median_ms",
                 "min_ms", "p90_ms", "GFLOP/s", "%cuBLAS", "max_rel_err", "status");
     for (auto& r : rows)
-        std::printf("%-14s %5d %10.4f %10.4f %10.4f %9.1f %8.1f %10.2e %s\n", r.kernel.c_str(),
+        std::printf("%-22s %5d %10.4f %10.4f %10.4f %9.1f %8.1f %10.2e %s\n", r.kernel.c_str(),
                     r.M, r.t.median_ms, r.t.min_ms, r.t.p90_ms, r.gflops, r.pct_cublas, r.err,
                     r.status.c_str());
 
@@ -206,8 +220,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const std::string csv_path = "results/sgemm_" + env.gpu_tag + "_" + env.stamp + ".csv";
-    const std::string env_path = "results/env_" + env.gpu_tag + "_" + env.stamp + ".json";
+    const std::string csv_path = "results/" + prefix + "sgemm_" + env.gpu_tag + "_" + env.stamp + ".csv";
+    const std::string env_path = "results/" + prefix + "env_" + env.gpu_tag + "_" + env.stamp + ".json";
 
     FILE* f = std::fopen(csv_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", csv_path.c_str()); return 1; }
@@ -245,7 +259,7 @@ int main(int argc, char** argv) {
     std::fclose(f);
 
     // Per-kernel resources of this build: registers, spills, shared memory, occupancy.
-    const std::string res_path = "results/kernels_" + env.gpu_tag + "_" + env.stamp + ".csv";
+    const std::string res_path = "results/" + prefix + "kernels_" + env.gpu_tag + "_" + env.stamp + ".csv";
     f = std::fopen(res_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s\n", res_path.c_str()); return 1; }
     const int max_warps = env.prop.maxThreadsPerMultiProcessor / 32;

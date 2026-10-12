@@ -22,7 +22,7 @@ from results_io import (FIGURES, KERNEL_ORDER, kernels_in, load_bandwidth, load_
                         parse_args, peak_fp32_gflops)
 
 # Reference categorical palette (light mode), fixed slot per kernel in KERNEL_ORDER.
-SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
+SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 COLOR = dict(zip(KERNEL_ORDER, SLOTS))
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 REF = "#52514e"  # cuBLAS reference line: neutral ink, not a category color

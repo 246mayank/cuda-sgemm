@@ -17,7 +17,7 @@ FIGURES = ROOT / "figures"
 # Kernel order for tables and fixed color slots for plots. Colors follow the kernel, so
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
-                "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered"]
+                "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free"]
 
 
 def parse_args(description):
@@ -74,6 +74,72 @@ def load_bandwidth():
     return (pd.read_csv(p), p) if p else (None, None)
 
 
+V7_DEFAULT = (128, 128, 8, 8, 8)
+
+
+def bench_name(kernel_symbol):
+    """Kernel symbol (demangled like 'sgemm_v7<128, 128, 8, 8, 8>(int, ...)' or mangled like
+    '_ZN..sgemm_v7ILi128ELi128ELi8ELi8ELi8EEE..') -> bench name ('v7_conflict_free',
+    'v7_64x64x8_4x4', 'v2_smem_tiling'), or None if it isn't one of ours."""
+    import re
+    s = str(kernel_symbol)
+    m = re.search(r"sgemm_v7(?:<\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*>|"
+                  r"ILi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)E)", s)
+    if m:
+        dims = tuple(int(g) for g in m.groups() if g is not None)
+        return "v7_conflict_free" if dims == V7_DEFAULT else "v7_{}x{}x{}_{}x{}".format(*dims)
+    for name in sorted(KERNEL_ORDER, key=len, reverse=True):  # known names first
+        if "sgemm_" + name in s:
+            return name
+    m = re.search(r"sgemm_(v\d+_[A-Za-z0-9_]+?)\(", s)  # demangled, unknown name
+    return m.group(1) if m else None
+
+
+def parse_sass(path):
+    """`cuobjdump -sass bench` output (optionally .gz) -> static instruction counts per kernel.
+
+    Static = instructions in the compiled code, not executed counts. The fully unrolled inner
+    loop dominates, so ratios such as LDS per FFMA reflect the inner loop.
+    """
+    import gzip
+    import re
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    rows, cur = {}, None
+    instr = re.compile(r"/\*[0-9a-f]{4,}\*/\s+(?:@!?U?P[T0-9]+\s+)?([A-Z][A-Z0-9_.]*)")
+    for line in text.splitlines():
+        if "Function :" in line:
+            cur = bench_name(line.split("Function :", 1)[1].strip())
+            if cur is not None:
+                rows.setdefault(cur, {})
+            continue
+        if cur is None:
+            continue
+        m = instr.search(line)
+        if not m:
+            continue
+        op = m.group(1)
+        if op.startswith("NOP"):
+            continue
+        c = rows[cur]
+        c["total"] = c.get("total", 0) + 1
+        for key, test in (("FFMA", op.startswith("FFMA")),
+                          ("LDS", op.startswith("LDS")),
+                          ("LDS.128", op.startswith("LDS") and ".128" in op),
+                          ("LDG", op.startswith("LDG")),
+                          ("LDG.128", op.startswith("LDG") and ".128" in op),
+                          ("STS", op.startswith("STS")),
+                          ("STS.128", op.startswith("STS") and ".128" in op),
+                          ("STG", op.startswith("STG")),
+                          ("STG.128", op.startswith("STG") and ".128" in op),
+                          ("BAR", op.startswith("BAR"))):
+            if test:
+                c[key] = c.get(key, 0) + 1
+    df = pd.DataFrame.from_dict(rows, orient="index").fillna(0).astype(int)
+    return df
+
+
 def parse_ncu(path):
     """Nsight Compute --csv log -> DataFrame indexed by kernel, one column per metric.
 
@@ -87,7 +153,7 @@ def parse_ncu(path):
     if start is None:
         return None
     df = pd.read_csv(io.StringIO("\n".join(lines[start:])))
-    df["kernel"] = df["Kernel Name"].str.extract(r"sgemm_(v\d+_[A-Za-z0-9_]+)")[0]
+    df["kernel"] = df["Kernel Name"].map(bench_name)
     df["value"] = pd.to_numeric(df["Metric Value"].astype(str).str.replace(",", ""),
                                 errors="coerce")
     df = df.dropna(subset=["kernel"]).sort_values("ID")

@@ -38,7 +38,8 @@ import sys
 import pandas as pd
 
 from results_io import (RESULTS, ROOT, kernels_in, load_bandwidth, load_ncu, load_resources,
-                        load_run, nvsmi_row, parse_args, parse_ncu, newest, peak_fp32_gflops)
+                        load_run, nvsmi_row, parse_args, parse_ncu, parse_sass, newest,
+                        peak_fp32_gflops)
 
 TEMPLATE = ROOT / "docs" / "README.template.md"
 README = ROOT / "README.md"
@@ -71,7 +72,22 @@ class Data:
         for n in (1023, 1024):
             p = newest(f"ncu_v0stride_{n}_*.csv")
             self.stride[n] = (parse_ncu(p), p) if p else (None, None)
+            p = newest(f"ncu_v0set_{n}_*.csv")  # L1 set-conflict counters (run 5 onwards)
+            self.stride[f"set{n}"] = (parse_ncu(p), p) if p else (None, None)
         self.peak = peak_fp32_gflops(self.env)
+        p = newest("sass_*.txt.gz")
+        self.sass, self.sass_path = (parse_sass(p), p) if p else (None, None)
+        # Tuning study and clock-locked runs: separate file prefixes, newest of each.
+        self.tune, self.tune_res, self.tune_path = None, None, None
+        p = newest("tune_sgemm_*.csv")
+        if p is not None:
+            self.tune, self.tune_path = pd.read_csv(p), p
+            rp = p.with_name(p.name.replace("tune_sgemm_", "tune_kernels_", 1))
+            self.tune_res = pd.read_csv(rp) if rp.exists() else None
+        self.locked, self.locked_path = None, None
+        p = newest("locked*_sgemm_*.csv")
+        if p is not None:
+            self.locked, self.locked_path = pd.read_csv(p), p
 
     # ------------------------------------------------------------- lookups
     def row(self, k, n):
@@ -181,6 +197,53 @@ class Data:
             return f"{self.ncu_val(args[0], args[1], args[2]):,.4g}"
         if name == "lds_per_ffma":
             return f"{self.lds_per_ffma(args[0]):.3f}"
+        if name == "bank_conflicts_st":
+            return f2(self.ncu_val("smem", "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+                                   args[0]))
+        if name == "ffma_share":
+            ffma_warp = self.ncu_val("smem", "smsp__sass_thread_inst_executed_op_ffma_pred_on.sum",
+                                     args[0]) / 32
+            return f"{100 * ffma_warp / self.ncu_val('smem', 'smsp__inst_executed.sum', args[0]):.0f}%"
+        if name == "sass":  # {{sass:K:COLUMN}}
+            if self.sass is None or args[0] not in self.sass.index:
+                raise Missing(f"sass for {args[0]}")
+            return f"{int(self.sass.loc[args[0]].get(args[1], 0)):,}"
+        if name == "tune_best":  # {{tune_best:N}} -> config name with best % at N
+            t = self.tune_rows()
+            g = t[(t.M == int(args[0])) & (t.status == "PASS")]
+            if g.empty:
+                raise Missing(f"tuning at N={args[0]}")
+            return f"`{g.loc[g.pct_cublas.idxmax()].kernel}`"
+        if name == "tune_best_pct":
+            t = self.tune_rows()
+            g = t[(t.M == int(args[0])) & (t.status == "PASS")]
+            if g.empty:
+                raise Missing(f"tuning at N={args[0]}")
+            return f"{g.pct_cublas.max():.1f}%"
+        if name == "tune_pct":  # {{tune_pct:CONFIG:N}}
+            t = self.tune_rows()
+            g = t[(t.kernel == args[0]) & (t.M == int(args[1]))]
+            if g.empty:
+                raise Missing(f"tuning {args[0]} at N={args[1]}")
+            return f"{g.pct_cublas.iloc[0]:.1f}%"
+        if name == "tune_waves":  # {{tune_waves:CONFIG:N}}
+            t = self.tune_rows()
+            g = t[(t.kernel == args[0]) & (t.M == int(args[1]))]
+            if g.empty or "waves" not in g:
+                raise Missing(f"waves {args[0]} at N={args[1]}")
+            return f"{g.waves.iloc[0]:.1f}"
+        if name == "locked_clock":
+            if self.locked is None or "sm_clock_mhz_after" not in self.locked:
+                raise Missing("locked run")
+            return f"{self.locked.sm_clock_mhz_after.median():.0f}"
+        if name == "locked_pct":  # {{locked_pct:K:N}}
+            if self.locked is None:
+                raise Missing("locked run")
+            d = self.locked
+            r = d[(d.kernel == args[0]) & (d.M == int(args[1]))]
+            if r.empty:
+                raise Missing(f"locked {args[0]} {args[1]}")
+            return f"{r.pct_cublas.iloc[0]:.1f}%"
         if name == "bank_conflicts":
             return f2(self.ncu_val("smem", "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
                                    args[0]))
@@ -311,7 +374,7 @@ class Data:
                 continue
             cells = [kname(k)]
             for tok in ("dram_mb", "traffic_x", "ai", "sectors_per_req", "l1hit", "l2hit",
-                        "lds_per_ffma", "bank_conflicts"):
+                        "lds_per_ffma", "bank_conflicts", "bank_conflicts_st", "ffma_share"):
                 try:
                     cells.append(self.scalar(tok, [k]))
                 except Missing:
@@ -320,8 +383,94 @@ class Data:
         return (f"Nsight Compute counters at N = {NCU_N} (last of 2 profiled launches per kernel):\n\n"
                 + md_table(["kernel", "DRAM MB moved", "vs minimum", "FLOP per DRAM byte",
                             "global sectors per load request", "L1 hit", "L2 hit",
-                            "shared loads per FFMA (warp-level)", "shared load bank conflicts"],
+                            "shared loads per FFMA (warp-level)", "shared-load bank conflicts",
+                            "shared-store bank conflicts", "FFMA share of instructions"],
                            rows))
+
+    def t_sass(self):
+        if self.sass is None:
+            raise Missing("sass_*.txt.gz")
+        cols = ["total", "FFMA", "LDS", "LDS.128", "LDG", "LDG.128", "STS", "STS.128", "STG",
+                "STG.128", "BAR"]
+        rows = []
+        for k in kernels_in(self.df):
+            if k not in self.sass.index:
+                continue
+            r = self.sass.loc[k]
+            cells = [kname(k)] + [f"{int(r.get(c, 0)):,}" for c in cols]
+            ffma, lds = r.get("FFMA", 0), r.get("LDS", 0)
+            cells.append(f"{lds / ffma:.3f}" if ffma else "n/a")
+            rows.append(cells)
+        return ("Static instruction counts in each kernel's compiled machine code (SASS, from "
+                "`cuobjdump -sass`). Static means instructions present in the binary, not "
+                "executed; the fully unrolled inner loop dominates, so the last column tracks the "
+                "inner loop's shared-load to FMA ratio. `.128` = 128-bit (vector) access.\n\n"
+                + md_table(["kernel"] + cols + ["LDS per FFMA (static)"], rows))
+
+    def tune_rows(self):
+        """Tuning results joined with resources: one row per (config, size), PASS only."""
+        if self.tune is None:
+            raise Missing("tune_sgemm_*.csv")
+        t = self.tune[self.tune.kernel != "cublas"].copy()
+        dims = t.kernel.str.extract(r"v7_(\d+)x(\d+)x(\d+)_(\d+)x(\d+)").astype(float)
+        t[["BM", "BN", "BK", "TM", "TN"]] = dims.values
+        if self.tune_res is not None:
+            t = t.merge(self.tune_res, on="kernel", how="left")
+            slots = self.env["sm_count"] * t.blocks_per_sm
+            blocks = (-(-t.M // t.BM)) * (-(-t.N // t.BN))
+            t["waves"] = blocks / slots
+        return t
+
+    def t_tune(self):
+        t = self.tune_rows()
+        sizes = sorted(t.M.unique())
+        failed = sorted(set(t[t.status == "FAILED"].kernel))
+        ok = t[~t.kernel.isin(failed)]
+        rows = []
+        for k, g in ok.groupby("kernel", sort=False):
+            r0 = g.iloc[0]
+            cells = [f"`{k}`", int(r0.threads_per_block) if "threads_per_block" in g else "",
+                     int(r0.regs_per_thread) if "regs_per_thread" in g else "",
+                     int(r0.blocks_per_sm) if "blocks_per_sm" in g else ""]
+            for s in sizes:
+                rr = g[g.M == s]
+                cells.append(f"{rr.pct_cublas.iloc[0]:.0f}%" if not rr.empty else "")
+            rows.append(cells)
+        best = []
+        for s in sizes:
+            g = ok[ok.M == s]
+            if g.empty:
+                continue
+            b = g.loc[g.pct_cublas.idxmax()]
+            best.append(f"N = {s}: `{b.kernel}` ({b.pct_cublas:.0f}%, {b.waves:.1f} waves)"
+                        if "waves" in g else f"N = {s}: `{b.kernel}` ({b.pct_cublas:.0f}%)")
+        note = ("" if not failed else
+                "\n\nFailed the cuBLAS check (excluded): " + ", ".join(f"`{k}`" for k in failed))
+        return ("% of paired cuBLAS for each tile configuration of the v7 kernel "
+                "(name = v7_<BM>x<BN>x<BK>_<TM>x<TN>: block tile, then thread tile), from "
+                f"`results/{self.tune_path.name}`:\n\n"
+                + md_table(["config", "threads", "registers", "blocks/SM"]
+                           + [f"N={s}" for s in sizes], rows)
+                + "\n\nBest configuration per size: " + "; ".join(best) + "." + note)
+
+    def t_locked(self):
+        if self.locked is None:
+            raise Missing("locked*_sgemm_*.csv")
+        d = self.locked
+        size = d.M.max()
+        rows = []
+        for k in ["cublas"] + kernels_in(d):
+            r = d[(d.kernel == k) & (d.M == size)]
+            if r.empty or r.status.iloc[0] == "FAILED":
+                continue
+            r = r.iloc[0]
+            rows.append([kname(k), f"{r.gflops:,.0f}",
+                         "100% (ref)" if k == "cublas" else f"{r.pct_cublas:.1f}%",
+                         f"{r.median_ms:.2f}", f"{r.min_ms:.2f} – {r.p90_ms:.2f}",
+                         f"{r.sm_clock_mhz_after:.0f}" if "sm_clock_mhz_after" in d else "n/a"])
+        return (f"Clock-locked run (`results/{self.locked_path.name}`), N = {size}:\n\n"
+                + md_table(["kernel", "GFLOP/s", "% cuBLAS", "median ms", "min – p90 ms",
+                            "SM clock after (MHz)"], rows))
 
     def t_bandwidth(self):
         if self.bw is None:
@@ -340,16 +489,23 @@ class Data:
                 ("lts__t_sector_hit_rate.pct", "L2 hit rate", lambda v: f"{v:.1f}%"),
                 ("l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum", "global load sectors",
                  lambda v: f"{v / 1e6:,.1f} M")]
+        mets += [("l1tex__t_set_accesses_pipe_lsu_mem_global_op_ld.sum", "L1 tag-stage set accesses",
+                  lambda v: f"{v / 1e6:,.1f} M"),
+                 ("l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld.sum", "L1 tag-stage set conflicts",
+                  lambda v: f"{v / 1e6:,.1f} M")]
         rows = []
         for m, label, fmt in mets:
             cells = [label]
             for n in (1023, 1024):
-                t, _ = self.stride[n]
-                cells.append(fmt(float(t.loc["v0_naive", m]))
-                             if t is not None and "v0_naive" in t.index and m in t.columns
-                             else "n/a")
-            rows.append(cells)
-        if all(c == "n/a" for r in rows for c in r[1:]):
+                val = None
+                for key in (n, f"set{n}"):
+                    t, _ = self.stride[key]
+                    if t is not None and "v0_naive" in t.index and m in t.columns:
+                        val = fmt(float(t.loc["v0_naive", m]))
+                cells.append(val or "n/a")
+            if any(c != "n/a" for c in cells[1:]):
+                rows.append(cells)
+        if not rows:
             raise Missing("ncu_v0stride_*.csv")
         return md_table(["v0_naive", "N = 1023", "N = 1024"], rows)
 
@@ -394,7 +550,8 @@ class Data:
         files = [self.csv_path, self.csv_path.with_name(self.csv_path.name.replace("sgemm_", "env_", 1)
                                                          ).with_suffix(".json"),
                  self.res_path, self.bw_path, *self.ncu_paths.values(),
-                 *(p for _, p in self.stride.values())]
+                 *(p for _, p in self.stride.values()), self.sass_path, self.tune_path,
+                 self.locked_path]
         return "\n".join(f"- `results/{p.name}`" for p in files if p is not None)
 
 

@@ -85,15 +85,15 @@ FMAs at the clock it can sustain.
 
 Nsight Compute counters at N = 2048 (last of 2 profiled launches per kernel):
 
-| kernel | DRAM MB moved | vs minimum | FLOP per DRAM byte | global sectors per load request | L1 hit | L2 hit | shared loads per FFMA (warp-level) | shared load bank conflicts |
-|---|---|---|---|---|---|---|---|---|
-| `v0_naive` | 2,258 | 44.9x | 7.6 | 16.5 | 99.2% | 76.5% | 0.000 | 0 |
-| `v1_coalesced` | 1,683 | 33.4x | 10.2 | 2.5 | 95.0% | 49.8% | 0.000 | 0 |
-| `v2_smem_tiling` | 1,664 | 33.1x | 10.3 | 4.0 | 0.0% | 48.5% | 1.250 | 0 |
-| `v3_1d_blocktiling` | 672 | 13.3x | 25.6 | 4.0 | 0.1% | 60.6% | 0.375 | 0 |
-| `v4_2d_blocktiling` | 224 | 4.5x | 76.6 | 3.9 | 17.9% | 80.4% | 0.062 | 33,554,432 |
-| `v5_vectorized` | 211 | 4.2x | 81.4 | 15.8 | 17.9% | 80.1% | 0.062 | 33,554,432 |
-| `v6_double_buffered` | 207 | 4.1x | 82.8 | 15.8 | 17.8% | 80.3% | 0.062 | 33,554,432 |
+| kernel | DRAM MB moved | vs minimum | FLOP per DRAM byte | global sectors per load request | L1 hit | L2 hit | shared loads per FFMA (warp-level) | shared-load bank conflicts | shared-store bank conflicts | FFMA share of instructions |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `v0_naive` | 2,258 | 44.9x | 7.6 | 16.5 | 99.2% | 76.5% | 0.000 | 0 | 0 | 22% |
+| `v1_coalesced` | 1,683 | 33.4x | 10.2 | 2.5 | 95.0% | 49.8% | 0.000 | 0 | 0 | 22% |
+| `v2_smem_tiling` | 1,664 | 33.1x | 10.3 | 4.0 | 0.0% | 48.5% | 1.250 | 0 | 0 | 33% |
+| `v3_1d_blocktiling` | 672 | 13.3x | 25.6 | 4.0 | 0.1% | 60.6% | 0.375 | 0 | 0 | 53% |
+| `v4_2d_blocktiling` | 224 | 4.5x | 76.6 | 3.9 | 17.9% | 80.4% | 0.062 | 33,554,432 | 0 | 83% |
+| `v5_vectorized` | 211 | 4.2x | 81.4 | 15.8 | 17.9% | 80.1% | 0.062 | 33,554,432 | 2,097,152 | 88% |
+| `v6_double_buffered` | 207 | 4.1x | 82.8 | 15.8 | 17.8% | 80.3% | 0.062 | 33,554,432 | 2,097,152 | 87% |
 
 How to read the counter columns:
 - "Global sectors per load request" is 32-byte sectors per warp-wide load instruction. 4 is
