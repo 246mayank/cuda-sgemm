@@ -37,6 +37,7 @@ const std::vector<TuneConfig>& v7_tune_configs();
 void launch_v8_warptiling(int M, int N, int K, const float* A, const float* B, float* C);
 KernelResources resources_v8_warptiling();
 const std::vector<TuneConfig>& v8_tune_configs();
+const std::vector<TuneConfig>& v10_tune_configs();  // tuning study only
 
 void launch_v9_autotuned(int M, int N, int K, const float* A, const float* B, float* C);
 KernelResources resources_v9_autotuned();

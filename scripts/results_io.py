@@ -97,6 +97,11 @@ def bench_name(kernel_symbol):
         d = tuple(int(g) for g in m.groups() if g is not None)
         return ("v8_warptiling" if d == V8_DEFAULT
                 else "v8_{}x{}x{}_w{}x{}_{}x{}".format(*d))
+    m = re.search(r"sgemm_v10(?:<\s*" + r",\s*".join([r"(\d+)"] * 7) + r"\s*>|"
+                  + r"ILi(\d+)E" + "".join([r"Li(\d+)E"] * 6) + ")", s)
+    if m:
+        d = tuple(int(g) for g in m.groups() if g is not None)
+        return "v10_{}x{}x{}_{}x{}_b{}_s{}".format(*d)
     for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel
         if name in s:
             return name

@@ -531,7 +531,7 @@ class Data:
         if self.tune is None:
             raise Missing("tune_sgemm_*.csv")
         t = self.tune[self.tune.kernel != "cublas"].copy()
-        dims = t.kernel.str.extract(r"v\d_(\d+)x(\d+)x(\d+)_").astype(float)
+        dims = t.kernel.str.extract(r"v\d+_(\d+)x(\d+)x(\d+)_").astype(float)
         t[["BM", "BN", "BK"]] = dims.values
         if self.tune_res is not None:
             t = t.merge(self.tune_res, on="kernel", how="left")
