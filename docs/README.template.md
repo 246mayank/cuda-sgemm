@@ -20,10 +20,21 @@ Main findings:
   column of 8 outputs (v3) and then an 8×8 tile (v4) is what gets it to {{pct:v4_2d_blocktiling:4096}}: shared-memory loads per
   FMA drop from {{lds_per_ffma:v2_smem_tiling}} to {{lds_per_ffma:v4_2d_blocktiling}}, and
   DRAM traffic falls to {{traffic_x:v4_2d_blocktiling}} the minimum.
-- **Two textbook optimizations did little here, and the counters show why.** The compiler had
-  already turned v4's shared-memory reads into 128-bit loads, so hand-vectorizing (v5) changed
-  nothing measurable. Two resident blocks per SM already overlap one block's loads with the
-  other's math, so double buffering (v6) adds only {{pspeedup:v6_double_buffered:v5_vectorized:4096}} at N = 4096.
+- **Bank conflicts were the hidden limiter.** Nsight Compute found {{conflicts_per_lds:v6_double_buffered}} shared-memory bank
+  conflicts per shared load in v4–v6. Remapping which outputs each thread owns (v7) cut them
+  {{conflict_ratio:v6_double_buffered:v7_conflict_free}}, for a
+  {{pspeedup:v7_conflict_free:v6_double_buffered:4096}} speedup: from {{pct:v6_double_buffered:4096}}
+  to {{pct:v7_conflict_free:4096}} of cuBLAS at N = 4096. A small Python model of the bank
+  rules predicted v6's conflict count exactly.
+- **Two textbook optimizations did little here, and the counters show why.** The machine code
+  shows the compiler had already turned v4's shared-memory reads into 128-bit loads, so
+  hand-vectorizing (v5) changed nothing measurable. Two resident blocks per SM already overlap
+  one block's loads with the other's math, so double buffering (v6) adds only
+  {{pspeedup:v6_double_buffered:v5_vectorized:4096}} at N = 4096.
+- **Tile shape matters as much as any single optimization.** A sweep over {{tune_count}} tile
+  configurations of the same kernel finds {{tune_best:4096}} at {{tune_best_pct:4096}} of cuBLAS
+  at N = 4096. At N = 256, small tiles beat cuBLAS outright ({{tune_best_pct:256}} for
+  {{tune_best:256}}): there the question is how many of the {{sm_count}} SMs get any work at all.
 - **The T4 is power-limited.** Under a dense FFMA load the SM clock drops far below its
   {{boost_mhz}} MHz boost. To compare kernels fairly, the harness times cuBLAS interleaved with every
   kernel, and records the clock and power after each measurement.
@@ -96,11 +107,14 @@ essentially the same at both sizes, yet the kernel takes far longer at 1024.
 
 {{table:v0stride}}
 
-So the same accesses, hitting in L1 just as often, are served more slowly. With a 4 KB stride
-(1024 floats), the 32 addresses of one warp request all map to the same L1 cache *set*, so the
-lookups can't proceed in parallel; an odd stride spreads them across sets. That is my working
-explanation. The L1 set-conflict counter that would confirm it directly wasn't collected in
-this run.
+So the same accesses, hitting in L1 just as often, are served more slowly. My first hypothesis
+was L1 cache *set* conflicts. With a 4 KB stride, the 32 addresses of one warp request map to
+the same set, and an odd stride would spread them out. I measured it, and **the data rejects
+it**: N = 1023 has *more* L1 set conflicts ({{stride:l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld.sum:1023}})
+than N = 1024 ({{stride:l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld.sum:1024}}), yet runs
+faster. The cause is still open. The next candidates are contention for L2 slices or DRAM
+channels: a power-of-two stride sends every request of a warp to the same address-interleaved
+partition. None of the counters collected here isolates that.
 
 ### v1: coalesced ([`v1_coalesced.cu`](src/kernels/v1_coalesced.cu))
 
@@ -228,12 +242,17 @@ Measured: **{{pspeedup:v7_conflict_free:v6_double_buffered:4096}} vs v6** at N =
 {{pspeedup:v7_conflict_free:v6_double_buffered:2048}} at N = 2048. Bank conflicts at N = 2048:
 {{bank_conflicts:v7_conflict_free}} on loads and {{bank_conflicts_st:v7_conflict_free}} on stores,
 against {{bank_conflicts:v6_double_buffered}} and {{bank_conflicts_st:v6_double_buffered}} for v6.
-<!-- FINALIZE AFTER RUN: one sentence interpreting the v7 speedup given 0 conflicts. -->
+The shared-load conflict count fell {{conflict_ratio:v6_double_buffered:v7_conflict_free}}, and
+that alone bought the largest step since v4: the FFMA share of instructions, shared loads per
+FMA and DRAM traffic are essentially unchanged from v6 (table above). What changed is that each
+shared load now takes one pass instead of three.
 
 **The conflict counts were predicted before the run.**
 [`scripts/bank_model.py`](scripts/bank_model.py) replays each kernel's shared-memory addresses
-for one warp and applies the bank rules. For v5 and v6 it reproduces Nsight Compute's counts
-exactly:
+for one warp and applies the bank rules.
+- For v5 and v6 it reproduces Nsight Compute's counts exactly.
+- For v7 and v8 it predicted zero. ncu measures a small residual of v6's count
+  that the model doesn't explain ({{conflict_pct:v7_conflict_free:v6_double_buffered}} for v7, {{conflict_pct:v8_warptiling:v6_double_buffered}} for v8), so it is reported here, not hidden.
 
 {{table:bankmodel}}
 
@@ -253,12 +272,16 @@ Measured: **{{pspeedup:v8_warptiling:v7_conflict_free:4096}} vs v7** at N = 4096
 ({{gflops:v8_warptiling:4096}} GFLOP/s, {{pct:v8_warptiling:4096}} of cuBLAS) and
 {{pspeedup:v8_warptiling:v7_conflict_free:2048}} at N = 2048. {{regs:v8_warptiling}} registers
 per thread, {{spill:v8_warptiling}} bytes spilled.
-<!-- FINALIZE AFTER RUN: interpretation. -->
+Warp tiling bought nothing measurable on top of v7. That's consistent with v7's counters: once
+the conflicts were gone, shared-memory bandwidth was no longer the limit. So asking for fewer
+distinct floats per warp (96 instead of 144) relieved a resource that wasn't the bottleneck. On
+tensor-core GPUs warp tiling matters more, because the warp tile is the unit that feeds `mma`
+instructions.
 
 ### Tuning study: one kernel, many tile shapes
 
 The v7 and v8 kernels are C++ templates over their tile sizes, so `./bench --tune` can run 18
-configurations of the same code at every size, all verified against cuBLAS:
+configurations ({{tune_count}} in total) of the same code at every size, all verified against cuBLAS:
 - **v7:** 12 block/thread tile shapes;
 - **v8:** 6 warp-tile shapes.
 
@@ -270,8 +293,18 @@ SMs are idle the whole time.
 
 {{table:tune}}
 
-<!-- FINALIZE AFTER RUN: what the best-per-size pattern shows. Caveat: picking the best of many
-noisy measurements biases the winner upward (winner's curse). -->
+What the sweep shows:
+- **Large sizes:** `v7_64x128x8_8x8` beats the default 128×128 tile
+  ({{tune_pct:v7_64x128x8_8x8:4096}} vs {{tune_pct:v7_128x128x8_8x8:4096}} at N = 4096). With
+  128 threads per block, 3 blocks fit on an SM instead of 2.
+- **Deeper K tiles (BK = 16) are consistently worse.** They double shared memory per block, so
+  fewer blocks fit on an SM, and that outweighs halving the barriers.
+- **Small sizes:** what matters is filling the SMs. At N = 256 the default tile makes
+  {{tune_waves:v7_128x128x8_8x8:256}} waves (most SMs idle), while a 32×32 tile makes
+  {{tune_waves:v7_32x32x8_4x4:256}}. The small-tile configs are the ones that beat cuBLAS there.
+- **Caveat:** picking the best of 18 noisy measurements biases the winner's number upward
+  (the "winner's curse"). The per-size winners should be re-measured on their own before
+  quoting them as one kernel's result.
 
 ### What the compiler actually emitted (SASS)
 
@@ -280,17 +313,25 @@ noisy measurements biases the winner upward (winner's curse). -->
 
 {{table:sass}}
 
-<!-- FINALIZE AFTER RUN: point to v4's LDS.128 count, v5's LDG.128, v7's STG.128. -->
+Three claims made earlier are confirmed in the machine code:
+- **v4** already reads shared memory only with `LDS.128`, though its source uses scalar reads.
+  That is why v5 gained nothing.
+- **v5** is where `LDG.128` (128-bit global loads) first appears.
+- **v7** writes C with `STG.128`.
+
+v2's static shared-loads-per-FMA ratio ({{sass:v2_smem_tiling:LDS}} loads for
+{{sass:v2_smem_tiling:FFMA}} FMAs) matches the dynamic ratio ncu measured
+({{lds_per_ffma:v2_smem_tiling}}).
 
 ### What still separates the best kernel from cuBLAS
 
-- **The clock.** The fastest single timed run of {{best_kernel:4096}} at N = 4096 is far above
-  its median; the T4 throttles to stay within {{power_limit}} (table in Methodology).
+- **The clock.** The fastest single timed run of each kernel at N = 4096 is far above its
+  median; the T4 throttles to stay within {{power_limit}} (table in Methodology).
 - **Occupancy.** 64 accumulators per thread cap v4–v8 at {{occ:v4_2d_blocktiling}} theoretical
   occupancy.
-- **Tile choice per size.** At N = 256, v3's smaller tile beats every 128×128 kernel
-  ({{gflops:v3_1d_blocktiling:256}} vs {{gflops:v6_double_buffered:256}} GFLOP/s for v6), which is
-  what the tuning study quantifies.
+- **Tile choice per size.** One fixed 128×128 tile is wrong for small N and not optimal for large
+  N; the tuning study above quantifies by how much. A dispatcher that picks the measured best
+  tile per size is the natural next step.
 
 ## Methodology
 
@@ -314,14 +355,21 @@ noisy measurements biases the winner upward (winner's curse). -->
   (table below), so every headline number comes from a single run in one session.
 - **Nsight Compute** worked on Colab's T4 (it is often blocked with `ERR_NVGPUCTRPERM`). ncu
   locks clocks and flushes caches between passes, so only its counters are used here, never
-  its timings. Counters come from a separate session right after the benchmark run, with the
-  same code.
+  its timings. Counters, SASS, tuning and the locked run come from a session right after the
+  headline benchmark, built from the same commit.
 - **Registers, spills and occupancy** are read from the compiled binary at run time
   (`cudaFuncGetAttributes`, `cudaOccupancyMaxActiveBlocksPerMultiprocessor`).
-- **Not measured:** the clock *during* each kernel (only sampled right after), per-kernel
-  energy, and the L1 set-conflict counter for the v0 stride effect.
+- **Clock-locked cross-check.** Colab allowed `nvidia-smi -lgc 900,900`, so the whole benchmark
+  was also run with the SM clock locked. The relative results hold:
+  {{locked_pct:v7_conflict_free:4096}} of cuBLAS for v7 at N = 4096 with the clock locked,
+  vs {{pct:v7_conflict_free:4096}} unlocked. At N = 4096 the power cap still pulled the clock
+  below the lock (table below), because a lock can't override the 70 W limit.
+- **Not measured:** the clock *during* each kernel (only sampled right after) and per-kernel
+  energy.
 
 {{table:clocks}}
+
+{{table:locked}}
 
 {{table:variability}}
 
