@@ -326,6 +326,19 @@ class Data:
                 raise Missing(f"tctune at N={args[0]}")
             b = g.loc[g.pct_cublas.idxmax()]
             return f"`{b.kernel}`" if name == "tctune_best" else f"{b.pct_cublas:.1f}%"
+        if name in ("epi_speedup", "epi_best"):  # {{epi_speedup:ACT:M:N:K}}, {{epi_best}}
+            d, _ = self.epi()
+            d = d[d.status == "PASS"]
+            if name == "epi_best":
+                if d.empty:
+                    raise Missing("epilogue PASS rows")
+                b = d.loc[d.speedup.idxmax()]
+                return f"{b.speedup:.2f}x ({b.act}, {b.M} × {b.N} × {b.K})"
+            r = d[(d.act == args[0]) & (d.M == int(args[1])) & (d.N == int(args[2]))
+                  & (d.K == int(args[3]))]
+            if r.empty:
+                raise Missing(f"epilogue {args}")
+            return f"{r.speedup.iloc[0]:.2f}x"
         if name == "tc_tflops":  # {{tc_tflops:K:N}} (K may be cublas = cublasGemmEx)
             return f"{self.tc_row(args[0], args[1]).gflops / 1000:.1f}"
         if name == "tc_pct":
@@ -723,6 +736,25 @@ class Data:
             raise Missing(f"reduce {k}")
         return r.iloc[0]
 
+    def epi(self):
+        p = newest("epi_Tesla*.csv") or newest("epi_[!e]*.csv")
+        if p is None:
+            raise Missing("epi_*.csv")
+        return pd.read_csv(p), p
+
+    def t_epilogue(self):
+        d, p = self.epi()
+        rows = []
+        for _, r in d.iterrows():
+            ok = r.status == "PASS"
+            rows.append([r.act, f"{r.M} × {r.N} × {r.K}", f"{r.unfused_median_ms:.3f}",
+                         f"{r.fused_median_ms:.3f}" if ok else "FAILED",
+                         f"{r.speedup:.2f}x" if ok else "", f"{r.max_rel_err:.1e}", r.status])
+        return ("act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation "
+                f"kernel, fused = f1; median times timed interleaved, from `results/{p.name}`:\n\n"
+                + md_table(["activation", "M × N × K", "unfused ms", "fused ms", "speedup",
+                            "max rel err (fused vs unfused)", "check"], rows))
+
     def t_shapes(self):
         p = newest("shapes_sgemm_*.csv")
         if p is None:
@@ -864,7 +896,7 @@ class Data:
                  self.res_path, self.bw_path, *self.ncu_paths.values(),
                  *(p for _, p in self.stride.values()), self.sass_path, self.tune_path,
                  self.locked_path, self.tc_path, RESULTS / "model_bank_conflicts.csv",
-                 newest("reduce_Tesla*.csv"), newest("shapes_sgemm_*.csv")]
+                 newest("reduce_Tesla*.csv"), newest("shapes_sgemm_*.csv"), newest("epi_Tesla*.csv")]
         files = [p for p in files if p is None or p.exists()]
         return "\n".join(f"- `results/{p.name}`" for p in files if p is not None)
 

@@ -533,6 +533,22 @@ measures better ({{shape_pct:v11_splitk:512:4096:4096}} vs {{shape_pct:v12_dispa
 - **What cuBLAS-class kernels add:** per-architecture hand-tuned SASS, larger K pipelines, and
   heuristics over many more shapes than 18.
 
+## Fused epilogue: GEMM + bias + activation
+
+Every transformer layer computes act(X·W + b). Unfused, a GEMM writes C to DRAM, then a second
+kernel reads C back, adds the bias, applies the activation and writes C again: an extra
+M·N·8 bytes of DRAM traffic and a second launch. [`f1_fused_epilogue.cu`](../src/kernels/f1_fused_epilogue.cu)
+is the v14 GEMM (generated from it by [`scripts/gen_f1.py`](../scripts/gen_f1.py)) with the
+bias and activation applied to the accumulators in registers, before the single store. The
+saving is a fixed cost per output element, so it matters most when the GEMM itself is short:
+small K, as in a transformer's FFN projections. `./bench --epilogue` compares it with
+`cublasSgemm` plus a separate bias + activation kernel (ReLU and GELU), timed interleaved, and
+checks the fused result against the unfused one.
+
+{{table:epilogue}}
+
+Best measured speedup: {{epi_best}}.
+
 ## Side study: parallel reduction
 
 A second classic kernel, measured the same way: sum 64 Mi floats, one idea per step
