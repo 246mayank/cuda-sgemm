@@ -430,7 +430,20 @@ At N = 4096, `tc1` runs **{{tc_speedup:tc1_wmma_smem:tc0_wmma_naive:4096}} faste
 
 `tc3` vs `tc2`: {{tc_speedup:tc3_ptx_mma:tc2_wmma_db:2048}} at N = 2048
 ({{tc_pct:tc3_ptx_mma:2048}} of `cublasGemmEx`), tensor pipe busy {{tcpipe:tc3_ptx_mma}}.
-<!-- FINALIZE AFTER TC3 RUN: interpretation. -->
+tc3 passes the check at every size, so the hand-written fragment layouts are right on real
+hardware. It is **not faster than tc2**, which has the same tiling: tc3 changed the instructions,
+not the schedule, and the schedule is what held tc2 back. It also reached the 128-register cap
+and spilled {{tc_res:tc3_ptx_mma:local_bytes_per_thread}} bytes per thread, because the
+prefetched tile is held in registers.
+
+- [`tc4_ptx_bk32.cu`](src/kernels/tc4_ptx_bk32.cu): tc3's PTX inner loop with tc1's schedule
+  (32-deep K tile, single buffer, two 16-deep MMA steps per barrier, no prefetch registers).
+  This separates the two effects: instruction path (PTX vs WMMA) and schedule (K depth).
+
+`tc4`: {{tc_pct:tc4_ptx_bk32:2048}} of `cublasGemmEx` at N = 2048 (tc1:
+{{tc_pct:tc1_wmma_smem:2048}}), {{tc_tflops:tc4_ptx_bk32:2048}} TFLOP/s, spills
+{{tc_res:tc4_ptx_bk32:local_bytes_per_thread}} bytes per thread.
+<!-- FINALIZE AFTER NIGHT RUN: tc4 vs tc1 interpretation (PTX at equal schedule). -->
 The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
 - **`tc0`** moves {{tcdram_mb:tc0_wmma_naive}} MB through DRAM, and its tensor pipe is busy only
   {{tcpipe:tc0_wmma_naive}} of the time: the tensor cores mostly wait for data.
@@ -442,6 +455,15 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   relative error at N = 2048. That's acceptable for many workloads, but not interchangeable with
   SGEMM.
 
+### Real-world shapes
+
+Square matrices are the textbook case. Transformer layers multiply rectangles: M = tokens, and
+N and K are model or feed-forward widths. `./bench --shapes` runs v4, v7 and v9 on such shapes.
+v9's dispatch table was tuned on squares only, so this tests how well the tuning generalises.
+
+{{table:shapes}}
+<!-- FINALIZE AFTER NIGHT RUN: what generalises and what doesn't (skinny M = 128, small K = 128). -->
+
 ### What still separates the best kernel from cuBLAS
 
 - **The clock.** The fastest single timed run of each kernel at N = 4096 is far above its
@@ -451,6 +473,27 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   using 128-thread blocks.
 - **What cuBLAS-class kernels add:** per-architecture hand-tuned SASS, larger K pipelines, and
   heuristics over many more shapes than 18.
+
+## Side study: parallel reduction
+
+A second classic kernel, measured the same way: sum 64 Mi floats, one idea per step
+([`src/reduce.cu`](src/reduce.cu)).
+
+| Kernel | What changes |
+|---|---|
+| `r0` | interleaved tree in shared memory, with divergent warps |
+| `r1` | contiguous active threads, but bank-conflicting indices |
+| `r2` | sequential addressing: no divergence, no conflicts |
+| `r3` | add two elements during the load |
+| `r4` | finish the last 32 values with warp shuffles |
+| `r5` | grid-stride `float4` loads into a register sum, one atomic per block |
+
+A reduction does one add per 4-byte element, so it is **bandwidth-bound**. The yardstick is
+therefore the measured DRAM bandwidth and CUB's `DeviceReduce::Sum`, not FLOPs. Each result is
+checked against a double-precision host sum.
+
+{{table:reduce}}
+<!-- FINALIZE AFTER NIGHT RUN: interpretation (which step closed most of the gap; how r5 compares with CUB and the roof). -->
 
 ## Methodology
 

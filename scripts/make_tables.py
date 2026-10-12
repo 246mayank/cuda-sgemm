@@ -274,6 +274,25 @@ class Data:
             if self.tune_res is None or args[0] not in set(self.tune_res.kernel):
                 raise Missing(f"tune resources for {args[0]}")
             return str(self.tune_res[self.tune_res.kernel == args[0]].iloc[0][args[1]])
+        if name == "tc_res":  # {{tc_res:K:COLUMN}} from tc_kernels_*.csv of the newest tc run
+            p = self.tc_path.with_name(self.tc_path.name.replace("tc_sgemm_", "tc_kernels_", 1)) \
+                if self.tc_path else None
+            if p is None or not p.exists():
+                raise Missing("tc_kernels_*.csv")
+            d = pd.read_csv(p)
+            r = d[d.kernel == args[0]]
+            if r.empty:
+                raise Missing(f"tc resources for {args[0]}")
+            return str(r.iloc[0][args[1]])
+        if name in ("red_gbps", "red_pct_cub", "red_pct_bw", "red_speedup"):
+            r = self.reduce_row(args[0])
+            if name == "red_gbps":
+                return f"{r.gbps:.0f}"
+            if name == "red_pct_cub":
+                return f"{r.pct_of_cub:.0f}%"
+            if name == "red_pct_bw":
+                return f"{100 * r.gbps / self.bw_best()[0]:.0f}%"
+            return f"{r.gbps / self.reduce_row(args[1]).gbps:.1f}x"  # {{red_speedup:K1:K2}}
         if name == "tc_tflops":  # {{tc_tflops:K:N}} (K may be cublas = cublasGemmEx)
             return f"{self.tc_row(args[0], args[1]).gflops / 1000:.1f}"
         if name == "tc_pct":
@@ -625,6 +644,51 @@ class Data:
                 f"\n\n"
                 + md_table(["kernel"] + [f"N={s}" for s in sizes], rows) + prec)
 
+    def t_reduce(self):
+        p = newest("reduce_Tesla*.csv") or newest("reduce_*.csv")
+        if p is None:
+            raise Missing("reduce_*.csv")
+        d = pd.read_csv(p)
+        bw = self.bw_best()[0] if self.bw is not None else None
+        rows = []
+        for _, r in d.iterrows():
+            rows.append([f"`{r.kernel}`" if r.kernel != "cub" else "CUB `DeviceReduce::Sum`",
+                         f"{r.median_ms:.3f}", f"{r.gbps:.0f}",
+                         f"{100 * r.gbps / bw:.0f}%" if bw else "n/a",
+                         "100% (ref)" if r.kernel == "cub" else f"{r.pct_of_cub:.0f}%",
+                         f"{r.rel_err:.1e}", r.status])
+        return (f"Sum of {int(d.n.iloc[0]):,} floats ({int(d.n.iloc[0]) * 4 // 2**20} MiB), from "
+                f"`results/{p.name}`. Bandwidth = input bytes / median time; the memory roof is the "
+                f"measured copy bandwidth ({bw:.0f} GB/s):\n\n" if bw else "\n\n") + md_table(
+            ["kernel", "median ms", "GB/s", "% of measured DRAM bandwidth", "% of CUB",
+             "relative error", "check"], rows)
+
+    def reduce_row(self, k):
+        p = newest("reduce_Tesla*.csv") or newest("reduce_*.csv")
+        if p is None:
+            raise Missing("reduce_*.csv")
+        d = pd.read_csv(p)
+        r = d[d.kernel == k]
+        if r.empty:
+            raise Missing(f"reduce {k}")
+        return r.iloc[0]
+
+    def t_shapes(self):
+        p = newest("shapes_sgemm_*.csv")
+        if p is None:
+            raise Missing("shapes_sgemm_*.csv")
+        d = pd.read_csv(p)
+        rows = []
+        for (m, n, k), g in d.groupby(["M", "N", "K"], sort=False):
+            cell = lambda name: (lambda r: "" if r.empty else ("FAILED" if r.status.iloc[0] == "FAILED"
+                                  else f"{r.pct_cublas.iloc[0]:.0f}%"))(g[g.kernel == name])
+            cub = g[g.kernel == "cublas"]
+            rows.append([f"{m} × {n} × {k}", f"{cub.gflops.iloc[0]:,.0f}" if not cub.empty else "",
+                         cell("v4_2d_blocktiling"), cell("v7_conflict_free"), cell("v9_autotuned")])
+        return (f"M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of "
+                f"paired cuBLAS, from `results/{p.name}`:\n\n"
+                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9"], rows))
+
     def t_locked(self):
         if self.locked is None:
             raise Missing("locked*_sgemm_*.csv")
@@ -723,7 +787,8 @@ class Data:
                                                          ).with_suffix(".json"),
                  self.res_path, self.bw_path, *self.ncu_paths.values(),
                  *(p for _, p in self.stride.values()), self.sass_path, self.tune_path,
-                 self.locked_path, self.tc_path, RESULTS / "model_bank_conflicts.csv"]
+                 self.locked_path, self.tc_path, RESULTS / "model_bank_conflicts.csv",
+                 newest("reduce_Tesla*.csv"), newest("shapes_sgemm_*.csv")]
         files = [p for p in files if p is None or p.exists()]
         return "\n".join(f"- `results/{p.name}`" for p in files if p is not None)
 

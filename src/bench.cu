@@ -30,6 +30,8 @@
 //                   inputs; sizes that are multiples of 128; prefix "tc_"; default tolerance
 //                   1e-3. Also writes tc_precision_*.csv: how far the FP16-input result is
 //                   from FP32 SGEMM (the precision cost of FP16 inputs, not a kernel error).
+//   --shapes        rectangular GEMMs of the kind found in transformer layers (M = tokens,
+//                   N/K = hidden or FFN width), for v4, v7, v9 vs cuBLAS; prefix "shapes_"
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
 //                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
@@ -83,7 +85,8 @@ int main(int argc, char** argv) {
     std::string kernel_filter;
     int only_size = 0, warmup = 3, reps = 20;
     double tol = 1e-4;
-    bool write = true, tune = false, tc = false, prefix_set = false, tol_set = false;
+    bool write = true, tune = false, tc = false, shapes_mode = false, prefix_set = false,
+         tol_set = false;
     std::string prefix;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -99,6 +102,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-write") write = false;
         else if (a == "--tune") tune = true;
         else if (a == "--tc") tc = true;
+        else if (a == "--shapes") shapes_mode = true;
         else if (a == "--prefix") { prefix = next(); prefix_set = true; }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
     }
@@ -175,6 +179,14 @@ int main(int argc, char** argv) {
         if (!prefix_set) prefix = "tc_";
         if (!tol_set) tol = 1e-3;
     }
+    if (shapes_mode) {
+        std::vector<Kernel> keep;
+        for (auto& k : all)
+            if (k.name == "v4_2d_blocktiling" || k.name == "v7_conflict_free" || k.name == "v9_autotuned")
+                keep.push_back(k);
+        all = keep;
+        if (!prefix_set) prefix = "shapes_";
+    }
     if (tune) {
         all.clear();
         for (const auto* list : {&v7_tune_configs(), &v8_tune_configs(), &v10_tune_configs()})
@@ -185,9 +197,17 @@ int main(int argc, char** argv) {
     for (auto& k : all)
         if (kernel_filter.empty() || k.name.rfind(kernel_filter, 0) == 0) kernels.push_back(k);
 
+    struct Shape {
+        int M, N, K;
+    };
+    std::vector<Shape> shapes;
     std::vector<int> sizes = {256, 512, 1000, 1023, 1024, 2048, 4096};
     if (tc) sizes = {256, 512, 1024, 2048, 4096};  // WMMA kernels have no edge handling
     if (only_size) sizes = {only_size};
+    for (int S : sizes) shapes.push_back({S, S, S});
+    if (shapes_mode)  // M = tokens; N, K = model / FFN widths (BERT-base 768/3072, larger 1024/4096)
+        shapes = {{4096, 4096, 4096}, {2048, 768, 768},  {2048, 3072, 768}, {2048, 768, 3072},
+                  {4096, 1024, 4096}, {512, 4096, 4096}, {128, 4096, 4096}, {4096, 4096, 128}};
     std::vector<std::pair<int, double>> precision;  // tc: FP16-input result vs FP32 SGEMM
 
     // ---------------------------------------------------------------- run
@@ -196,8 +216,9 @@ int main(int argc, char** argv) {
     std::uniform_real_distribution<float> dist(-1.f, 1.f);
     GpuTimer timer;
 
-    for (int S : sizes) {
-        const int M = S, N = S, K = S;
+    for (const Shape& sh : shapes) {
+        const int M = sh.M, N = sh.N, K = sh.K;
+        const int S = std::max(M, std::max(N, K));
         const size_t nA = (size_t)M * K, nB = (size_t)K * N, nC = (size_t)M * N;
         const double flop = 2.0 * M * N * K;
 
