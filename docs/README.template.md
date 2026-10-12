@@ -12,8 +12,8 @@ N = 4096** ({{best_gflops:4096}} GFLOP/s), and **{{pct:v9_autotuned:256}} of cuB
 it beats cuBLAS. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
 GFLOP/s on a power-capped T4 depends on how hot the GPU was at the time. At N = 2048 the best,
 {{best_kernel:2048}} ({{best_pct:2048}}), is {{best_speedup_vs:v0_naive:2048}} the naive kernel. A
-separate FP16 **tensor-core** track reaches **{{tc_tflops:tc1_wmma_smem:2048}} TFLOP/s**
-({{tc_pct:tc1_wmma_smem:2048}} of `cublasGemmEx`). All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
+separate FP16 **tensor-core** track reaches **{{tc_best_tflops:2048}} TFLOP/s** with
+{{tc_best:2048}} ({{tc_best_pct:2048}} of `cublasGemmEx`). All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
 (largest normwise relative error {{maxerr}}, tolerance {{tol}}), including the non-multiple
 sizes 1000 and 1023.
 
@@ -310,6 +310,30 @@ What the sweep shows:
   (the "winner's curse"). The per-size winners should be re-measured on their own before
   quoting them as one kernel's result.
 
+### v10: occupancy by launch bounds, and threadblock swizzle
+
+The sweep above says the best shape wins on **occupancy**: with 128-thread blocks, 3 fit on an SM
+instead of 2. [`v10_tuned.cu`](src/kernels/v10_tuned.cu) is v7's kernel (generated from it) with
+two more template knobs, swept in the same study:
+- **`MINB`**, the minimum-blocks-per-SM hint of `__launch_bounds__`. It caps registers per
+  thread at 65536 / (MINB × threads).
+- **`SWZ`**, a threadblock swizzle. The grid is walked in groups of SWZ block-columns, so blocks
+  resident at the same time share B column-panels in L2.
+
+Results for the 64×128 tile at N = 4096:
+
+| config | registers | blocks/SM | % of cuBLAS |
+|---|---|---|---|
+| `v10_64x128x8_8x8_b2_s0` (= v7's best shape) | {{tune_res:v10_64x128x8_8x8_b2_s0:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b2_s0:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b2_s0:4096}} |
+| `v10_64x128x8_8x8_b4_s0` (128-register cap) | {{tune_res:v10_64x128x8_8x8_b4_s0:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b4_s0:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b4_s0:4096}} |
+| `v10_64x128x8_8x8_b2_s8` (swizzle only) | {{tune_res:v10_64x128x8_8x8_b2_s8:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b2_s8:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b2_s8:4096}} |
+
+- **Capping registers worked.** At 128 registers per thread the compiler still didn't spill
+  ({{tune_res:v10_64x128x8_8x8_b4_s0:local_bytes_per_thread}} bytes of local memory), and a
+  fourth block per SM gives more warps to hide shared-load and barrier latency.
+- **The swizzle is about neutral.** That's consistent with the roofline: these kernels sit far
+  to the right of the ridge, so L2 and DRAM traffic aren't what limits them.
+
 ### What the compiler actually emitted (SASS)
 
 "The compiler already vectorised v4's shared loads" is checked in the machine code: `cuobjdump
@@ -368,9 +392,17 @@ against SGEMM, and it never appears in the FP32 tables. Two kernels:
 
 {{table:tc}}
 
+- [`tc2_wmma_db.cu`](src/kernels/tc2_wmma_db.cu): tc1 plus double buffering. The next K tile's
+  global loads are in flight while the tensor cores work, with two shared buffers and one
+  barrier per tile. The K tile is cut from 32 to 16 so both buffers still let 2 blocks share an
+  SM.
+
 At N = 4096, `tc1` runs **{{tc_speedup:tc1_wmma_smem:tc0_wmma_naive:4096}} faster than `tc0`** and
 {{tc_vs_fp32:tc1_wmma_smem:4096}} the throughput of the fastest FP32 kernel, at
-{{tc_pct:tc1_wmma_smem:4096}} of `cublasGemmEx`.
+{{tc_pct:tc1_wmma_smem:4096}} of `cublasGemmEx`. `tc2` vs `tc1`:
+{{tc_speedup:tc2_wmma_db:tc1_wmma_smem:2048}} at N = 2048 ({{tc_pct:tc2_wmma_db:2048}} of
+`cublasGemmEx`), with the tensor pipe busy {{tcpipe:tc2_wmma_db}} of the time.
+<!-- FINALIZE AFTER FINAL RUN: interpret tc2 vs tc1 (did overlap pay for the shallower K tile?). -->
 The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
 - **`tc0`** moves {{tcdram_mb:tc0_wmma_naive}} MB through DRAM, and its tensor pipe is busy only
   {{tcpipe:tc0_wmma_naive}} of the time: the tensor cores mostly wait for data.

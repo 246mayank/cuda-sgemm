@@ -261,6 +261,19 @@ class Data:
             if g.empty or "waves" not in g:
                 raise Missing(f"waves {args[0]} at N={args[1]}")
             return f"{g.waves.iloc[0]:.1f}"
+        if name in ("tc_best", "tc_best_tflops", "tc_best_pct"):  # best tensor-core kernel at N
+            if self.tc is None:
+                raise Missing("tc_sgemm_*.csv")
+            d = self.tc[(self.tc.M == int(args[0])) & (self.tc.status == "PASS")]
+            if d.empty:
+                raise Missing(f"tc at N={args[0]}")
+            b = d.loc[d.pct_cublas.idxmax()]
+            return {"tc_best": f"`{b.kernel}`", "tc_best_tflops": f"{b.gflops / 1000:.1f}",
+                    "tc_best_pct": f"{b.pct_cublas:.1f}%"}[name]
+        if name == "tune_res":  # {{tune_res:CONFIG:COLUMN}} from tune_kernels_*.csv
+            if self.tune_res is None or args[0] not in set(self.tune_res.kernel):
+                raise Missing(f"tune resources for {args[0]}")
+            return str(self.tune_res[self.tune_res.kernel == args[0]].iloc[0][args[1]])
         if name == "tc_tflops":  # {{tc_tflops:K:N}} (K may be cublas = cublasGemmEx)
             return f"{self.tc_row(args[0], args[1]).gflops / 1000:.1f}"
         if name == "tc_pct":

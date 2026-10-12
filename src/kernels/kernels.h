@@ -47,3 +47,5 @@ void launch_tc0_wmma_naive(int M, int N, int K, const half* A, const half* B, fl
 void launch_tc1_wmma_smem(int M, int N, int K, const half* A, const half* B, float* C);
 KernelResources resources_tc0_wmma_naive();
 KernelResources resources_tc1_wmma_smem();
+void launch_tc2_wmma_db(int M, int N, int K, const half* A, const half* B, float* C);
+KernelResources resources_tc2_wmma_db();

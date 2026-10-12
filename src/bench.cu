@@ -156,6 +156,11 @@ int main(int argc, char** argv) {
                  launch_tc1_wmma_smem(M, N, K, dAh, dBh, C);
              },
              resources_tc1_wmma_smem, 1 << 30},
+            {"tc2_wmma_db",
+             [&](int M, int N, int K, const float*, const float*, float* C) {
+                 launch_tc2_wmma_db(M, N, K, dAh, dBh, C);
+             },
+             resources_tc2_wmma_db, 1 << 30},
         };
         if (!prefix_set) prefix = "tc_";
         if (!tol_set) tol = 1e-3;
