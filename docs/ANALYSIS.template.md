@@ -408,6 +408,13 @@ against SGEMM, and it never appears in the FP32 tables. Two kernels:
 
 {{table:tc}}
 
+![Tensor-core roofline](../figures/roofline_tc.png)
+
+The tensor-core kernels on their own roofline: the same measured DRAM roof, the theoretical
+tensor-core peak (SMs × 8 tensor cores × 64 FMA per clock × 2 × max clock) and `cublasGemmEx` as
+the practical ceiling. tc0 sits far down the memory slope. The shared-memory kernels sit close
+together just left of the ridge, below both roofs and below `cublasGemmEx`.
+
 - [`tc2_wmma_db.cu`](../src/kernels/tc2_wmma_db.cu): tc1 plus double buffering. The next K tile's
   global loads are in flight while the tensor cores work, with two shared buffers and one
   barrier per tile. The K tile is cut from 32 to 16 so both buffers still let 2 blocks share an
