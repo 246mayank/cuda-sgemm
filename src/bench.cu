@@ -133,6 +133,7 @@ int main(int argc, char** argv) {
         {"v6_double_buffered", launch_v6_double_buffered, resources_v6_double_buffered, 1 << 30},
         {"v7_conflict_free", launch_v7_conflict_free, resources_v7_conflict_free, 1 << 30},
         {"v8_warptiling", launch_v8_warptiling, resources_v8_warptiling, 1 << 30},
+        {"v9_autotuned", launch_v9_autotuned, resources_v9_autotuned, 1 << 30},
     };
     // Tensor-core track: launchers read the FP16 copies (dAh, dBh) made for each size; the
     // reference is cublasGemmEx on the same FP16 inputs with FP32 output and FP32 compute.

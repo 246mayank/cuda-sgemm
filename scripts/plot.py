@@ -21,9 +21,18 @@ import matplotlib.pyplot as plt
 from results_io import (FIGURES, KERNEL_ORDER, kernels_in, load_bandwidth, load_ncu, load_run,
                         parse_args, peak_fp32_gflops)
 
-# Reference categorical palette (light mode), fixed slot per kernel in KERNEL_ORDER.
+# Reference categorical palette (light mode): 8 validated slots. Line and roofline charts show a
+# fixed set of key kernels (the in-between versions sit almost on top of a neighbour and would
+# need more hues than the palette has); every kernel is in the bar chart and the tables.
 SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
-COLOR = dict(zip(KERNEL_ORDER, SLOTS))
+PLOTTED = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
+           "v4_2d_blocktiling", "v7_conflict_free", "v9_autotuned"]
+COLOR = dict(zip(PLOTTED, SLOTS))
+
+
+def omitted_note(ks):
+    left = [k for k in ks if k not in PLOTTED]
+    return ("Not drawn (see tables): " + ", ".join(left)) if left else ""
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 REF = "#52514e"  # cuBLAS reference line: neutral ink, not a category color
 
@@ -83,7 +92,7 @@ def gflops_vs_size(df, env, csv_path):
     ax.plot(ref.M, ref.gflops, color=REF, lw=2, ls="--", marker="o", ms=5, label="cuBLAS")
     ends = [("cuBLAS", ref.M.iloc[-1], ref.gflops.iloc[-1])]
 
-    for k in kernels_in(ok):
+    for k in [k for k in kernels_in(ok) if k in PLOTTED]:
         d = ok[(ok.kernel == k) & ok.M.isin(sizes)].sort_values("M")
         if d.empty:
             continue
@@ -100,6 +109,7 @@ def gflops_vs_size(df, env, csv_path):
     ax.set_title("SGEMM throughput vs size", loc="left", fontsize=13, color=INK, pad=18)
     ax.text(0, 1.01, subtitle(env, csv_path), transform=ax.transAxes, fontsize=8, color=INK2)
     ax.legend(loc="upper left", fontsize=9)
+    fig.text(0.99, 0.01, omitted_note(kernels_in(ok)), ha="right", fontsize=8, color=INK2)
     failure_note(fig, df)
     fig.tight_layout()
     out = FIGURES / "gflops_vs_size.png"
@@ -167,8 +177,8 @@ def roofline(df, env, csv_path):
     ax.axvline(ideal_ai, color=GRID, lw=1.5)
     ax.text(x[1], peak * 1.08, f"FP32 peak {peak:,.0f} GFLOP/s (theoretical)  ", ha="right",
             va="bottom", color=INK2, fontsize=8)
-    ax.text(x[1], cublas * 0.92, f"cuBLAS {cublas:,.0f} GFLOP/s at N = {n} (practical)  ",
-            ha="right", va="top", color=INK2, fontsize=8)
+    ax.text(x[1], cublas * 1.06, f"cuBLAS {cublas:,.0f} GFLOP/s at N = {n} (practical)  ",
+            ha="right", va="bottom", color=INK2, fontsize=8)
     ax.text(0.3, 0.3 * mem_roof * 0.55, f"measured DRAM roof\n{mem_roof:.0f} GB/s", ha="left",
             va="top", color=INK, fontsize=8)
     ax.text(0.07, 0.07 * theo_bw * 2.4, f"spec {theo_bw:.0f} GB/s (dotted)", ha="left",
@@ -177,7 +187,7 @@ def roofline(df, env, csv_path):
             va="bottom", color=INK2, fontsize=8)
 
     placed = []
-    for k in kernels_in(at_n):
+    for k in [k for k in kernels_in(at_n) if k in PLOTTED]:
         if k not in ncu.index:
             continue
         r = ncu.loc[k]
@@ -215,6 +225,7 @@ def roofline(df, env, csv_path):
             f"bandwidth: {bw_path.name}", transform=ax.transAxes, fontsize=7, color=INK2)
     if placed:
         ax.legend(loc="center left", fontsize=8)
+    fig.text(0.99, 0.01, omitted_note(kernels_in(at_n)), ha="right", fontsize=8, color=INK2)
     failure_note(fig, df)
     fig.tight_layout()
     out = FIGURES / "roofline.png"

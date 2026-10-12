@@ -18,7 +18,7 @@ FIGURES = ROOT / "figures"
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
                 "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free",
-                "v8_warptiling"]
+                "v8_warptiling", "v9_autotuned"]
 
 
 def parse_args(description):
@@ -75,6 +75,7 @@ def load_bandwidth():
     return (pd.read_csv(p), p) if p else (None, None)
 
 
+TC_KERNELS = ["tc0_wmma_naive", "tc1_wmma_smem"]
 V7_DEFAULT = (128, 128, 8, 8, 8)
 V8_DEFAULT = (128, 128, 8, 64, 32, 2, 2)
 
@@ -96,6 +97,9 @@ def bench_name(kernel_symbol):
         d = tuple(int(g) for g in m.groups() if g is not None)
         return ("v8_warptiling" if d == V8_DEFAULT
                 else "v8_{}x{}x{}_w{}x{}_{}x{}".format(*d))
+    for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel
+        if name in s:
+            return name
     for name in sorted(KERNEL_ORDER, key=len, reverse=True):  # known names first
         if "sgemm_" + name in s:
             return name
