@@ -1,0 +1,5 @@
+kernel,regs_per_thread,local_bytes_per_thread,static_smem_bytes,threads_per_block,blocks_per_sm,warps_per_sm,max_warps_per_sm,theoretical_occupancy_pct
+tc0_wmma_naive,64,0,0,128,8,32,32,100.0
+tc1_wmma_smem,122,0,18944,256,2,16,32,50.0
+tc2_wmma_db,125,0,20992,256,2,16,32,50.0
+tc3_ptx_mma,128,16,20992,256,2,16,32,50.0
