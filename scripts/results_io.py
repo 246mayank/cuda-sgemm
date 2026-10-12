@@ -107,6 +107,11 @@ def bench_name(kernel_symbol):
     if m:
         d = tuple(int(g) for g in m.groups() if g is not None)
         return "v13_{}x{}x{}_w{}x{}_{}x{}_b{}".format(*d)
+    m = re.search(r"sgemm_v14(?:<\s*" + r",\s*".join([r"(\d+)"] * 7) + r"\s*>|"
+                  + r"ILi(\d+)E" + "".join([r"Li(\d+)E"] * 6) + ")", s)
+    if m:
+        d = tuple(int(g) for g in m.groups() if g is not None)
+        return "v14_{}x{}x{}_{}x{}_b{}_s{}".format(*d)
     if re.search(r"sgemm_v11(?:<|I)", s):  # v11 split-K template
         return "v11_splitk"
     for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel

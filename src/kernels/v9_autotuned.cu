@@ -40,7 +40,7 @@ const Entry kTable[] = {
 
 const TuneConfig& find_config(const char* name) {
     for (const auto* list : {&v7_tune_configs(), &v8_tune_configs(), &v10_tune_configs(),
-                              &v13_tune_configs()})
+                              &v13_tune_configs(), &v14_tune_configs()})
         for (const TuneConfig& c : *list)
             if (std::strcmp(c.name, name) == 0) return c;
     std::fprintf(stderr, "v9: config %s from v9_dispatch_table.inc is not compiled in\n", name);
