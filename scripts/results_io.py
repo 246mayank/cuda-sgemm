@@ -17,7 +17,7 @@ FIGURES = ROOT / "figures"
 # Kernel order for tables and fixed color slots for plots. Colors follow the kernel, so
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
-                "v4_2d_blocktiling", "v5_vectorized", "v6_warptiling"]
+                "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered"]
 
 
 def parse_args(description):

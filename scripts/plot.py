@@ -57,28 +57,44 @@ def subtitle(env, csv_path):
             f"source: {csv_path.name}")
 
 
+def label_line_ends(ax, ends, min_ratio=1.22):
+    """Direct labels at line ends, nudged apart vertically (log axis) so they never overlap.
+    Labels ending at the same x are spread; the arrow-free nudge keeps them next to their line."""
+    import math
+    by_x = {}
+    for name, x, y in ends:
+        by_x.setdefault(x, []).append([name, y, y])
+    for x, items in by_x.items():
+        items.sort(key=lambda t: t[1])
+        for i in range(1, len(items)):
+            if items[i][2] < items[i - 1][2] * min_ratio:
+                items[i][2] = items[i - 1][2] * min_ratio
+        for name, y, ylab in items:
+            ax.annotate(name, (x, y), xytext=(x * 1.08, ylab), textcoords="data",
+                        va="center", color=INK2, fontsize=9)
+
+
 def gflops_vs_size(df, env, csv_path):
     ok = passing(df)
     sizes = sorted(s for s in ok.M.unique() if s & (s - 1) == 0)  # powers of two only
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(9, 5.5))
 
     ref = ok[(ok.kernel == "cublas") & ok.M.isin(sizes)].sort_values("M")
     ax.plot(ref.M, ref.gflops, color=REF, lw=2, ls="--", marker="o", ms=5, label="cuBLAS")
-    ax.annotate("cuBLAS", (ref.M.iloc[-1], ref.gflops.iloc[-1]), xytext=(6, 0),
-                textcoords="offset points", va="center", color=INK2)
+    ends = [("cuBLAS", ref.M.iloc[-1], ref.gflops.iloc[-1])]
 
     for k in kernels_in(ok):
         d = ok[(ok.kernel == k) & ok.M.isin(sizes)].sort_values("M")
         if d.empty:
             continue
         ax.plot(d.M, d.gflops, color=COLOR.get(k, INK2), lw=2, marker="o", ms=5, label=k)
-        ax.annotate(k, (d.M.iloc[-1], d.gflops.iloc[-1]), xytext=(6, 0),
-                    textcoords="offset points", va="center", color=INK2)
+        ends.append((k, d.M.iloc[-1], d.gflops.iloc[-1]))
+    label_line_ends(ax, ends)
 
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     ax.set_xticks(sizes, [str(s) for s in sizes])
-    ax.set_xlim(sizes[0] / 1.2, sizes[-1] * 2.2)  # room for end labels
+    ax.set_xlim(sizes[0] / 1.2, sizes[-1] * 3.2)  # room for end labels
     ax.set_xlabel("matrix size N (M = N = K)")
     ax.set_ylabel("GFLOP/s (log scale)")
     ax.set_title("SGEMM throughput vs size", loc="left", fontsize=13, color=INK, pad=18)
@@ -108,7 +124,7 @@ def pct_cublas(df, env, csv_path):
     ax.set_xlabel(f"% of cuBLAS GFLOP/s at {size}x{size}x{size}")
     ax.grid(axis="y", visible=False)
     ax.set_title(f"Fraction of cuBLAS at N = {size}", loc="left", fontsize=13, color=INK, pad=18)
-    ax.text(0, 1.02, subtitle(env, csv_path), transform=ax.transAxes, fontsize=8, color=INK2)
+    ax.text(0, 1.02, subtitle(env, csv_path), transform=ax.transAxes, fontsize=7, color=INK2)
     failure_note(fig, df)
     fig.tight_layout()
     out = FIGURES / "pct_cublas.png"

@@ -143,6 +143,20 @@ inline std::string nvidia_smi_snapshot() {
         "clocks.max.mem,temperature.gpu,power.draw,power.limit --format=csv 2>&1");
 }
 
+// SM clock and board power right now, via nvidia-smi (NAN if unavailable). bench samples this
+// right after each kernel's timed runs, so every CSV row records the throttling state it was
+// measured in. One sample, not an average over the runs.
+struct GpuSample {
+    double sm_mhz, power_w;
+};
+inline GpuSample sample_gpu() {
+    const std::string s = run_cmd(
+        "nvidia-smi --query-gpu=clocks.sm,power.draw --format=csv,noheader,nounits 2>/dev/null");
+    GpuSample g{NAN, NAN};
+    if (std::sscanf(s.c_str(), "%lf , %lf", &g.sm_mhz, &g.power_w) != 2) g = {NAN, NAN};
+    return g;
+}
+
 inline std::string json_str(const std::string& s) {
     std::string o = "\"";
     for (char c : s) {

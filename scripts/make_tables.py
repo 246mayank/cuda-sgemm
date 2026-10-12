@@ -116,6 +116,9 @@ class Data:
         if name == "speedup":
             a, b = self.row(args[0], args[2]).gflops, self.row(args[1], args[2]).gflops
             return f"{a / b:.1f}x"
+        if name == "pspeedup":  # throttle-normalised: ratio of the two kernels' % of paired cuBLAS
+            a, b = self.row(args[0], args[2]).pct_cublas, self.row(args[1], args[2]).pct_cublas
+            return f"{a / b:.2f}x"
         if name == "cublas_paired":
             return f2(self.cublas_paired(args[0]))
         if name == "pct_peak":
@@ -327,6 +330,28 @@ class Data:
         if all(c == "n/a" for r in rows for c in r[1:]):
             raise Missing("ncu_v0stride_*.csv")
         return md_table(["v0_naive", "N = 1023", "N = 1024"], rows)
+
+    def t_clocks(self):
+        df = self.df
+        if "sm_clock_mhz_after" not in df.columns or df.sm_clock_mhz_after.isna().all():
+            raise Missing("sm_clock_mhz_after column (added after run 3)")
+        size = df.M.max()
+        lanes = self.peak / (self.env["sm_clock_max_khz"] / 1e6)  # GFLOP/s per GHz at peak
+        rows = []
+        for k in ["cublas"] + kernels_in(df):
+            r = df[(df.kernel == k) & (df.M == size)]
+            if r.empty or r.status.iloc[0] == "FAILED":
+                continue
+            r = r.iloc[0]
+            clk = r.sm_clock_mhz_after
+            rows.append([kname(k), f"{r.gflops:,.0f}", f"{clk:.0f}", f"{r.power_w_after:.1f}",
+                         f"{100 * r.gflops / (lanes * clk / 1000):.0f}%"])
+        return (f"Throttling at N = {size}: SM clock and board power sampled by `nvidia-smi` right "
+                f"after each kernel's timed runs (one sample, not an average), and GFLOP/s as a "
+                f"fraction of the FP32 peak *at that clock*. Max boost clock is "
+                f"{self.env['sm_clock_max_khz'] // 1000} MHz; the power limit is 70 W.\n\n"
+                + md_table(["kernel", "GFLOP/s", "SM clock after (MHz)", "power after (W)",
+                            "% of peak at that clock"], rows))
 
     def t_variability(self):
         runs = sorted(RESULTS.glob("sgemm_*.csv"))

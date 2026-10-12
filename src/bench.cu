@@ -59,6 +59,7 @@ struct Row {
     double gflops, pct_cublas, err;
     std::string status;
     double cublas_paired_ms;  // NAN for the cuBLAS row itself
+    GpuSample after;          // SM clock / power sampled right after the timed runs
 };
 
 }  // namespace
@@ -110,6 +111,7 @@ int main(int argc, char** argv) {
         {"v3_1d_blocktiling", launch_v3_1d_blocktiling, resources_v3_1d_blocktiling, 1 << 30},
         {"v4_2d_blocktiling", launch_v4_2d_blocktiling, resources_v4_2d_blocktiling, 1 << 30},
         {"v5_vectorized", launch_v5_vectorized, resources_v5_vectorized, 1 << 30},
+        {"v6_double_buffered", launch_v6_double_buffered, resources_v6_double_buffered, 1 << 30},
     };
     std::vector<Kernel> kernels;
     for (auto& k : all)
@@ -164,7 +166,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaGetLastError());
         const TimingStats sc = summarize(tc);
         rows.push_back({"cublas", M, N, K, sc, flop / (sc.median_ms * 1e6), 100.0, 0.0, "REF",
-                        NAN});
+                        NAN, sample_gpu()});
 
         for (auto& k : kernels) {
             if (S > k.max_size) continue;
@@ -180,7 +182,7 @@ int main(int argc, char** argv) {
             const TimingStats st = summarize(tk), sp = summarize(tp);
             rows.push_back({k.name, M, N, K, st, flop / (st.median_ms * 1e6),
                             100.0 * sp.median_ms / st.median_ms, err,
-                            (err <= tol) ? "PASS" : "FAILED", sp.median_ms});
+                            (err <= tol) ? "PASS" : "FAILED", sp.median_ms, sample_gpu()});
         }
 
         CUDA_CHECK(cudaFree(dA));
@@ -210,13 +212,19 @@ int main(int argc, char** argv) {
     FILE* f = std::fopen(csv_path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", csv_path.c_str()); return 1; }
     std::fprintf(f, "kernel,M,N,K,median_ms,min_ms,p90_ms,gflops,pct_cublas,max_rel_err,status,"
-                    "cublas_paired_median_ms\n");
+                    "cublas_paired_median_ms,sm_clock_mhz_after,power_w_after\n");
+    auto opt = [&](double v, const char* fmt) {
+        if (std::isnan(v)) std::fprintf(f, ",");
+        else { std::fprintf(f, ","); std::fprintf(f, fmt, v); }
+    };
     for (auto& r : rows) {
-        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.3f,%.3f,%.3e,%s,", r.kernel.c_str(), r.M,
+        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.3f,%.3f,%.3e,%s", r.kernel.c_str(), r.M,
                      r.N, r.K, r.t.median_ms, r.t.min_ms, r.t.p90_ms, r.gflops, r.pct_cublas,
                      r.err, r.status.c_str());
-        if (std::isnan(r.cublas_paired_ms)) std::fprintf(f, "\n");
-        else std::fprintf(f, "%.6f\n", r.cublas_paired_ms);
+        opt(r.cublas_paired_ms, "%.6f");
+        opt(r.after.sm_mhz, "%.0f");
+        opt(r.after.power_w, "%.2f");
+        std::fprintf(f, "\n");
     }
     std::fclose(f);
 

@@ -45,7 +45,8 @@ src/
     v3_1d_blocktiling.cu   each thread computes a column of TM outputs (register reuse)
     v4_2d_blocktiling.cu   each thread computes a TMxTN outer-product tile
     v5_vectorized.cu       float4 global loads, transposed A tile in smem
-    (stretch) v6_warptiling.cu, v7_wmma_fp16.cu (tensor cores; separate FP16 track)
+    v6_double_buffered.cu  prefetch next tile into registers, 2 smem buffers, 1 sync per tile
+    (stretch) v7_warptiling.cu, v8_wmma_fp16.cu (tensor cores; separate FP16 track)
   bench.cu                 harness: allocate, init, run each kernel + cuBLAS, verify, time, CSV
   common.h                 CUDA_CHECK, timer, device query, verify()
   bandwidth.cu             measured DRAM bandwidth (copy kernel) for the roofline
