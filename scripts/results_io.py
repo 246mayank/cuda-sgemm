@@ -75,7 +75,7 @@ def load_bandwidth():
     return (pd.read_csv(p), p) if p else (None, None)
 
 
-TC_KERNELS = ["tc0_wmma_naive", "tc1_wmma_smem", "tc2_wmma_db"]
+TC_KERNELS = ["tc0_wmma_naive", "tc1_wmma_smem", "tc2_wmma_db", "tc3_ptx_mma"]
 V7_DEFAULT = (128, 128, 8, 8, 8)
 V8_DEFAULT = (128, 128, 8, 64, 32, 2, 2)
 

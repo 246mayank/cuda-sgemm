@@ -413,6 +413,17 @@ At N = 4096, `tc1` runs **{{tc_speedup:tc1_wmma_smem:tc0_wmma_naive:4096}} faste
 {{tc_speedup:tc2_wmma_db:tc1_wmma_smem:2048}} at N = 2048 ({{tc_pct:tc2_wmma_db:2048}} of
 `cublasGemmEx`), with the tensor pipe busy {{tcpipe:tc2_wmma_db}} of the time.
 <!-- FINALIZE AFTER FINAL RUN: interpret tc2 vs tc1 (did overlap pay for the shallower K tile?). -->
+
+- [`tc3_ptx_mma.cu`](src/kernels/tc3_ptx_mma.cu): the same tiling as tc2, written without WMMA.
+  It uses the PTX instructions WMMA hides: `ldmatrix.sync…x4` (one instruction loads four 8×8
+  FP16 matrices into the exact register layout the MMA expects; `.trans` handles B) and
+  `mma.sync.aligned.m16n8k8`, Turing's native tensor-core instruction. Its fragment index math
+  was checked before the GPU run against a CPU emulation of both instructions, written from the
+  PTX ISA's layout definitions.
+
+`tc3` vs `tc2`: {{tc_speedup:tc3_ptx_mma:tc2_wmma_db:2048}} at N = 2048
+({{tc_pct:tc3_ptx_mma:2048}} of `cublasGemmEx`), tensor pipe busy {{tcpipe:tc3_ptx_mma}}.
+<!-- FINALIZE AFTER TC3 RUN: interpretation. -->
 The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
 - **`tc0`** moves {{tcdram_mb:tc0_wmma_naive}} MB through DRAM, and its tensor pipe is busy only
   {{tcpipe:tc0_wmma_naive}} of the time: the tensor cores mostly wait for data.
