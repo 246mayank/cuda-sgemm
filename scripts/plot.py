@@ -188,9 +188,21 @@ def roofline(df, env, csv_path):
         g = float(at_n[at_n.kernel == k].gflops.iloc[0])
         ax.scatter([ai], [g], s=60, color=COLOR.get(k, INK2), edgecolor=SURFACE, lw=2, zorder=3,
                    label=k)
-        ax.annotate(k, (ai, g), xytext=(7, -3), textcoords="offset points", color=INK2,
-                    fontsize=8)
-        placed.append(k)
+        placed.append((k, ai, g))
+
+    # Labels: points that nearly coincide (v4-v6) get stacked labels below them, with a
+    # thin leader line, so no two labels overlap.
+    label_y = []
+    for k, ai, g in sorted(placed, key=lambda p: -p[2]):
+        ly = g
+        for (px, py) in label_y:
+            if 1 / 3.5 < ai / px < 3.5 and ly > py / 1.25:
+                ly = py / 1.25
+        label_y.append((ai, ly))
+        moved_label = ly < g / 1.01
+        ax.annotate(k, (ai, g), xytext=(ai * 1.25, ly), textcoords="data", va="center",
+                    color=INK2, fontsize=8,
+                    arrowprops=dict(arrowstyle="-", color=GRID, lw=0.8) if moved_label else None)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -202,7 +214,7 @@ def roofline(df, env, csv_path):
     ax.text(0, 1.01, f"{subtitle(env, csv_path)}\nDRAM bytes: {ncu_path.name}; "
             f"bandwidth: {bw_path.name}", transform=ax.transAxes, fontsize=7, color=INK2)
     if placed:
-        ax.legend(loc="upper left", fontsize=8)
+        ax.legend(loc="center left", fontsize=8)
     failure_note(fig, df)
     fig.tight_layout()
     out = FIGURES / "roofline.png"

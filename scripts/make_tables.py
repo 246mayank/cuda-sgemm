@@ -25,6 +25,10 @@ Tokens (K = kernel name such as v2_smem_tiling, N = square size):
   {{stride:METRIC:N}}   v0 ncu metric at N = 1023 or 1024
   {{var:K:N}}           run-to-run range of median GFLOP/s across all runs, "min-max (n runs)"
   {{ideal_ai}}          FLOP / minimum DRAM bytes at the ncu size
+  {{ridge}}             FLOP/byte where the measured DRAM roof meets the FP32 peak
+  {{gflops_min:K:N}}    GFLOP/s of the fastest single timed run
+  {{pspeedup:K1:K2:N}}  throttle-normalised speedup: ratio of the two % of paired cuBLAS
+  {{table:clocks}}      SM clock / power sampled after each kernel at the largest size
 
 Usage: .venv/Scripts/python scripts/make_tables.py [--csv results/sgemm_....csv]
 """
@@ -116,6 +120,24 @@ class Data:
         if name == "speedup":
             a, b = self.row(args[0], args[2]).gflops, self.row(args[1], args[2]).gflops
             return f"{a / b:.1f}x"
+        if name == "sizeratio":  # same kernel, GFLOP/s at N1 / GFLOP/s at N2
+            a, b = self.row(args[0], args[1]).gflops, self.row(args[0], args[2]).gflops
+            return f"{a / b:.1f}x"
+        if name == "warmups":
+            return str(self.env["warmup_runs"])
+        if name == "reps":
+            return str(self.env["timed_runs"])
+        if name == "boost_mhz":
+            return str(self.env["sm_clock_max_khz"] // 1000)
+        if name == "sm_count":
+            return str(self.env["sm_count"])
+        if name == "power_limit":
+            return nvsmi_row(self.env["nvidia_smi_start"]).get("power.limit [W]", "n/a")
+        if name == "ridge":  # FLOP/byte where the measured DRAM roof meets the FP32 peak
+            return f"{self.peak / self.bw_best()[0]:.0f}"
+        if name == "gflops_min":  # from the fastest single timed run (least throttled)
+            r = self.row(args[0], args[1])
+            return f2(2.0 * int(args[1]) ** 3 / (r.min_ms * 1e6))
         if name == "pspeedup":  # throttle-normalised: ratio of the two kernels' % of paired cuBLAS
             a, b = self.row(args[0], args[2]).pct_cublas, self.row(args[1], args[2]).pct_cublas
             return f"{a / b:.2f}x"
@@ -349,7 +371,8 @@ class Data:
         return (f"Throttling at N = {size}: SM clock and board power sampled by `nvidia-smi` right "
                 f"after each kernel's timed runs (one sample, not an average), and GFLOP/s as a "
                 f"fraction of the FP32 peak *at that clock*. Max boost clock is "
-                f"{self.env['sm_clock_max_khz'] // 1000} MHz; the power limit is 70 W.\n\n"
+                f"{self.env['sm_clock_max_khz'] // 1000} MHz; the power limit is "
+                f"{nvsmi_row(self.env['nvidia_smi_start']).get('power.limit [W]', 'n/a')}.\n\n"
                 + md_table(["kernel", "GFLOP/s", "SM clock after (MHz)", "power after (W)",
                             "% of peak at that clock"], rows))
 
