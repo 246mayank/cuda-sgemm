@@ -7,9 +7,11 @@ instruction mix. **Every number in this README is generated from the CSVs in
 [`results/`](results/)** by [`scripts/make_tables.py`](scripts/make_tables.py); none is typed
 by hand.
 
-**Result.** The best FP32 kernel, {{best_kernel:4096}}, reaches **{{best_pct:4096}} of cuBLAS at
-N = 4096** ({{best_gflops:4096}} GFLOP/s), and **{{pct:v9_autotuned:256}} of cuBLAS at N = 256**, where
-it beats cuBLAS. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
+**Result.** The best FP32 kernel at N = 4096, {{best_kernel:4096}}, reaches **{{best_pct:4096}} of
+cuBLAS** ({{best_gflops:4096}} GFLOP/s). At N = 256 the autotuned dispatcher `v9_autotuned` **beats
+cuBLAS: {{pct:v9_autotuned:256}}**. On a skinny transformer shape (128 × 4096 × 4096), split-K
+lifts the result from {{shape_pct:v9_autotuned:128:4096:4096}} to
+{{shape_pct:v11_splitk:128:4096:4096}}. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
 GFLOP/s on a power-capped T4 depends on how hot the GPU was at the time. At N = 2048 the best,
 {{best_kernel:2048}} ({{best_pct:2048}}), is {{best_speedup_vs:v0_naive:2048}} the naive kernel. A
 separate FP16 **tensor-core** track reaches **{{tc_best_tflops:2048}} TFLOP/s** with
@@ -469,9 +471,11 @@ v9's dispatch table was tuned on squares only, so this tests how well the tuning
 
 {{table:shapes}}
 What generalises:
-- **Wide shapes.** v9, tuned only on squares, holds most of its square-size advantage on wide
-  transformer shapes (e.g. {{shape_pct:v9_autotuned:2048:3072:768}} on 2048 × 3072 × 768).
-- **Small K.** With K = 128 it beats cuBLAS ({{shape_pct:v9_autotuned:4096:4096:128}}).
+- **Wide shapes.** v9, tuned only on squares, reaches {{shape_pct:v9_autotuned:4096:1024:4096}}
+  on 4096 × 1024 × 4096 and {{shape_pct:v9_autotuned:2048:768:768}} on 2048 × 768 × 768. Shapes
+  this small finish in tens of microseconds, so their percentages move several points between
+  sessions; compare them within one table, not across runs.
+- **Small K.** With K = 128 it is level with cuBLAS ({{shape_pct:v9_autotuned:4096:4096:128}}).
 
 What doesn't:
 - **Skinny M.** At M = 128, v9 drops to {{shape_pct:v9_autotuned:128:4096:4096}}. A 64-row tile
@@ -485,7 +489,6 @@ What doesn't:
   when the grid already fills the GPU.
 - Skinny M = 128: {{shape_pct:v11_splitk:128:4096:4096}} of cuBLAS (v9:
   {{shape_pct:v9_autotuned:128:4096:4096}}).
-<!-- FINALIZE AFTER FINAL RUN: confirm the v11 sentence direction. -->
 
 ### What still separates the best kernel from cuBLAS
 

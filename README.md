@@ -9,37 +9,39 @@ instruction mix. **Every number in this README is generated from the CSVs in
 [`results/`](results/)** by [`scripts/make_tables.py`](scripts/make_tables.py); none is typed
 by hand.
 
-**Result.** The best FP32 kernel, `v9_autotuned`, reaches **89.0% of cuBLAS at
-N = 4096** (2,937 GFLOP/s), and **122.2% of cuBLAS at N = 256**, where
-it beats cuBLAS. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
+**Result.** The best FP32 kernel at N = 4096, `v11_splitk`, reaches **89.9% of
+cuBLAS** (3,156 GFLOP/s). At N = 256 the autotuned dispatcher `v9_autotuned` **beats
+cuBLAS: 124.5%**. On a skinny transformer shape (128 × 4096 × 4096), split-K
+lifts the result from 71.3% to
+89.6%. Kernels are ranked by % of cuBLAS timed in the same thermal state, because raw
 GFLOP/s on a power-capped T4 depends on how hot the GPU was at the time. At N = 2048 the best,
-`v9_autotuned` (88.9%), is 54.5x the naive kernel. A
-separate FP16 **tensor-core** track reaches **26.5 TFLOP/s** with
-`tc1_wmma_smem` (68.1% of `cublasGemmEx`). All 69 of 69 kernel/size results pass the cuBLAS check
+`v9_autotuned` (88.8%), is 58.4x the naive kernel. A
+separate FP16 **tensor-core** track reaches **26.8 TFLOP/s** with
+`tc1_wmma_smem` (72.0% of `cublasGemmEx`). All 76 of 76 kernel/size results pass the cuBLAS check
 (largest normwise relative error 2.2e-06, tolerance 1e-04), including the non-multiple
 sizes 1000 and 1023.
 
 Main findings:
 
 - **Register tiling is where the speed comes from.** Coalescing and shared-memory tiling
-  (v1, v2) leave the kernel at 13.6% of cuBLAS. Making each thread compute a
-  column of 8 outputs (v3) and then an 8×8 tile (v4) is what gets it to 60.9%: shared-memory loads per
+  (v1, v2) leave the kernel at 12.4% of cuBLAS. Making each thread compute a
+  column of 8 outputs (v3) and then an 8×8 tile (v4) is what gets it to 60.6%: shared-memory loads per
   FMA drop from 1.250 to 0.062, and
   DRAM traffic falls to 4.4x the minimum.
 - **Bank conflicts were the hidden limiter.** Nsight Compute found 2.0 shared-memory bank
   conflicts per shared load in v4–v6. Remapping which outputs each thread owns (v7) cut them
-  2,334x, for a
-  1.39x speedup: from 59.1%
-  to 82.1% of cuBLAS at N = 4096. A small Python model of the bank
+  2,382x, for a
+  1.46x speedup: from 56.6%
+  to 82.7% of cuBLAS at N = 4096. A small Python model of the bank
   rules predicted v6's conflict count exactly.
 - **Two textbook optimizations did little here, and the counters show why.** The machine code
   shows the compiler had already turned v4's shared-memory reads into 128-bit loads, so
   hand-vectorizing (v5) changed nothing measurable. Two resident blocks per SM already overlap
   one block's loads with the other's math, so double buffering (v6) adds only
-  1.02x at N = 4096.
+  1.01x at N = 4096.
 - **Tile shape matters as much as any single optimization.** A sweep over 40 tile
-  configurations of the same kernel finds `v10_64x128x8_8x8_b4_s16` at 90.3% of cuBLAS
-  at N = 4096. At N = 256, small tiles beat cuBLAS outright (130.9% for
+  configurations of the same kernel finds `v10_64x128x8_8x8_b2_s8` at 92.4% of cuBLAS
+  at N = 4096. At N = 256, small tiles beat cuBLAS outright (134.8% for
   `v7_64x32x8_4x4`): there the question is how many of the 40 SMs get any work at all.
 - **The T4 is power-limited.** Under a dense FFMA load the SM clock drops far below its
   1590 MHz boost. To compare kernels fairly, the harness times cuBLAS interleaved with every
@@ -53,32 +55,34 @@ Main findings:
 
 | kernel | GFLOP/s | median ms | min – p90 ms | % cuBLAS | max rel err | check |
 |---|---|---|---|---|---|---|
-| cuBLAS | 3,552 | 38.70 | 27.89 – 39.46 | 100% (ref) | reference | REF |
-| `v1_coalesced` | 499 | 275.67 | 244.59 – 277.37 | 10.4% | 0.0e+00 | PASS |
-| `v2_smem_tiling` | 707 | 194.48 | 164.80 – 194.85 | 13.6% | 0.0e+00 | PASS |
-| `v3_1d_blocktiling` | 1,303 | 105.50 | 72.12 – 106.87 | 29.6% | 0.0e+00 | PASS |
-| `v4_2d_blocktiling` | 2,505 | 54.86 | 29.52 – 56.45 | 60.9% | 0.0e+00 | PASS |
-| `v5_vectorized` | 2,532 | 54.28 | 29.86 – 56.30 | 58.0% | 0.0e+00 | PASS |
-| `v6_double_buffered` | 2,556 | 53.77 | 28.13 – 54.63 | 59.1% | 0.0e+00 | PASS |
-| `v7_conflict_free` | 3,104 | 44.28 | 21.51 – 44.86 | 82.1% | 0.0e+00 | PASS |
-| `v8_warptiling` | 3,075 | 44.70 | 21.89 – 44.89 | 81.4% | 0.0e+00 | PASS |
-| `v9_autotuned` | 2,937 | 46.80 | 22.35 – 47.22 | 89.0% | 0.0e+00 | PASS |
+| cuBLAS | 3,873 | 35.49 | 25.09 – 35.70 | 100% (ref) | reference | REF |
+| `v1_coalesced` | 535 | 256.67 | 229.88 – 257.46 | 10.3% | 0.0e+00 | PASS |
+| `v2_smem_tiling` | 762 | 180.30 | 156.46 – 181.63 | 12.4% | 0.0e+00 | PASS |
+| `v3_1d_blocktiling` | 1,425 | 96.43 | 66.56 – 97.12 | 28.2% | 0.0e+00 | PASS |
+| `v4_2d_blocktiling` | 2,777 | 49.50 | 28.30 – 51.89 | 60.6% | 0.0e+00 | PASS |
+| `v5_vectorized` | 2,623 | 52.40 | 29.45 – 53.44 | 56.1% | 0.0e+00 | PASS |
+| `v6_double_buffered` | 2,660 | 51.67 | 27.97 – 52.82 | 56.6% | 0.0e+00 | PASS |
+| `v7_conflict_free` | 3,426 | 40.11 | 21.35 – 41.28 | 82.7% | 0.0e+00 | PASS |
+| `v8_warptiling` | 3,404 | 40.37 | 21.27 – 41.29 | 82.2% | 0.0e+00 | PASS |
+| `v9_autotuned` | 3,246 | 42.34 | 22.18 – 42.54 | 88.6% | 0.0e+00 | PASS |
+| `v11_splitk` | 3,156 | 43.55 | 21.22 – 44.55 | 89.9% | 0.0e+00 | PASS |
 
 Not run at this size: `v0_naive` (largest size run: 2048).
 
 | GFLOP/s | N=256 | N=512 | N=1000 | N=1023 | N=1024 | N=2048 | N=4096 |
 |---|---|---|---|---|---|---|---|
-| cuBLAS | 750 | 2,676 | 5,915 | 5,548 | 5,965 | 4,971 | 3,552 |
-| `v0_naive` | 26 | 32 | 110 | 177 | 60 | 61 |  |
-| `v1_coalesced` | 354 | 808 | 680 | 643 | 648 | 531 | 499 |
-| `v2_smem_tiling` | 428 | 997 | 879 | 929 | 925 | 776 | 707 |
-| `v3_1d_blocktiling` | 529 | 1,904 | 2,097 | 2,054 | 2,177 | 1,533 | 1,303 |
-| `v4_2d_blocktiling` | 229 | 1,928 | 3,442 | 3,358 | 3,373 | 2,877 | 2,505 |
-| `v5_vectorized` | 233 | 1,949 | 3,417 | 3,057 | 3,575 | 2,860 | 2,532 |
-| `v6_double_buffered` | 253 | 2,131 | 3,292 | 3,109 | 3,596 | 3,617 | 2,556 |
-| `v7_conflict_free` | 321 | 2,473 | 4,437 | 4,223 | 4,546 | 3,306 | 3,104 |
-| `v8_warptiling` | 323 | 2,521 | 4,479 | 4,021 | 4,766 | 3,465 | 3,075 |
-| `v9_autotuned` | 909 | 3,824 | 4,396 | 4,181 | 4,855 | 3,348 | 2,937 |
+| cuBLAS | 793 | 2,702 | 5,955 | 5,679 | 6,100 | 5,813 | 3,873 |
+| `v0_naive` | 28 | 35 | 112 | 184 | 60 | 62 |  |
+| `v1_coalesced` | 382 | 804 | 646 | 699 | 688 | 563 | 535 |
+| `v2_smem_tiling` | 459 | 994 | 890 | 948 | 944 | 816 | 762 |
+| `v3_1d_blocktiling` | 567 | 1,920 | 2,107 | 2,078 | 2,079 | 1,662 | 1,425 |
+| `v4_2d_blocktiling` | 252 | 1,949 | 3,509 | 3,495 | 3,514 | 3,029 | 2,777 |
+| `v5_vectorized` | 252 | 1,957 | 3,448 | 3,159 | 3,560 | 2,984 | 2,623 |
+| `v6_double_buffered` | 274 | 2,151 | 3,427 | 3,218 | 3,630 | 3,082 | 2,660 |
+| `v7_conflict_free` | 349 | 2,490 | 4,829 | 4,309 | 4,926 | 3,729 | 3,426 |
+| `v8_warptiling` | 351 | 2,527 | 4,693 | 4,052 | 4,914 | 3,671 | 3,404 |
+| `v9_autotuned` | 1,010 | 3,855 | 4,371 | 4,310 | 4,879 | 3,607 | 3,246 |
+| `v11_splitk` | 546 | 3,671 | 4,799 | 4,137 | 5,166 | 3,614 | 3,156 |
 
 ![% of cuBLAS](figures/pct_cublas.png)
 
@@ -86,7 +90,7 @@ Not run at this size: `v0_naive` (largest size run: 2048).
 
 ![Roofline](figures/roofline.png)
 
-- **Memory roof:** the **measured** DRAM bandwidth, 236 GB/s (74% of the
+- **Memory roof:** the **measured** DRAM bandwidth, 235 GB/s (73% of the
   320 GB/s spec), from [`src/bandwidth.cu`](src/bandwidth.cu).
 - **Compute roof:** the theoretical FP32 peak, 8,141 GFLOP/s (40 SMs × 64 FP32 lanes ×
   1590 MHz boost × 2 for FMA). It is labelled theoretical because the T4 can't hold that clock
@@ -99,7 +103,7 @@ Not run at this size: `v0_naive` (largest size run: 2048).
 
 How to read it: v0–v2 sit far *below* the DRAM roof, so DRAM bandwidth isn't what limits them.
 They are limited inside the SM, by how many load instructions the L1/shared-memory path can
-serve. v4–v6 sit to the *right* of the ridge (76.7–82.7
+serve. v4–v6 sit to the *right* of the ridge (76.8–82.9
 FLOP/byte), so DRAM is no longer the limit at all. What remains is how fast the SM can issue
 FMAs at the clock it can sustain.
 
@@ -107,16 +111,17 @@ Nsight Compute counters at N = 2048 (last of 2 profiled launches per kernel):
 
 | kernel | DRAM MB moved | vs minimum | FLOP per DRAM byte | global sectors per load request | L1 hit | L2 hit | shared loads per FFMA (warp-level) | shared-load bank conflicts | shared-store bank conflicts | FFMA share of instructions |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `v0_naive` | 2,258 | 44.9x | 7.6 | 16.5 | 99.2% | 76.5% | 0.000 | 0 | 0 | 22% |
+| `v0_naive` | 2,260 | 44.9x | 7.6 | 16.5 | 99.2% | 76.6% | 0.000 | 0 | 0 | 22% |
 | `v1_coalesced` | 1,688 | 33.5x | 10.2 | 2.5 | 95.0% | 49.8% | 0.000 | 0 | 0 | 22% |
-| `v2_smem_tiling` | 1,667 | 33.1x | 10.3 | 4.0 | 0.0% | 48.5% | 1.250 | 0 | 0 | 33% |
+| `v2_smem_tiling` | 1,663 | 33.0x | 10.3 | 4.0 | 0.0% | 48.5% | 1.250 | 0 | 0 | 33% |
 | `v3_1d_blocktiling` | 672 | 13.3x | 25.6 | 4.0 | 0.1% | 60.6% | 0.375 | 0 | 0 | 53% |
-| `v4_2d_blocktiling` | 224 | 4.4x | 76.7 | 3.9 | 17.9% | 80.5% | 0.062 | 33,554,432 | 0 | 83% |
-| `v5_vectorized` | 209 | 4.1x | 82.4 | 15.8 | 17.9% | 80.3% | 0.062 | 33,554,432 | 2,097,152 | 88% |
-| `v6_double_buffered` | 208 | 4.1x | 82.7 | 15.8 | 17.8% | 80.4% | 0.062 | 33,554,432 | 2,097,152 | 87% |
-| `v7_conflict_free` | 184 | 3.7x | 93.2 | 15.8 | 0.1% | 79.7% | 0.062 | 14,375 | 137,505 | 87% |
-| `v8_warptiling` | 185 | 3.7x | 93.1 | 15.8 | 1.4% | 79.7% | 0.062 | 21,972 | 65,119 | 87% |
-| `v9_autotuned` | 281 | 5.6x | 61.1 | 15.8 | 0.2% | 76.2% | 0.062 | 29,617 | 532,505 | 84% |
+| `v4_2d_blocktiling` | 224 | 4.4x | 76.8 | 3.9 | 17.9% | 80.5% | 0.062 | 33,554,432 | 0 | 83% |
+| `v5_vectorized` | 207 | 4.1x | 83.0 | 15.8 | 17.9% | 80.3% | 0.062 | 33,554,432 | 2,097,152 | 88% |
+| `v6_double_buffered` | 207 | 4.1x | 82.9 | 15.8 | 17.8% | 80.3% | 0.062 | 33,554,432 | 2,097,152 | 87% |
+| `v7_conflict_free` | 184 | 3.7x | 93.2 | 15.8 | 0.1% | 79.7% | 0.062 | 14,089 | 139,616 | 87% |
+| `v8_warptiling` | 185 | 3.7x | 93.0 | 15.8 | 1.4% | 79.6% | 0.062 | 28,144 | 70,979 | 87% |
+| `v9_autotuned` | 281 | 5.6x | 61.2 | 15.8 | 0.2% | 76.2% | 0.062 | 29,335 | 526,325 | 84% |
+| `v11_splitk` | 281 | 5.6x | 61.1 | 15.8 | 0.2% | 76.2% | 0.062 | 30,879 | 540,685 | 84% |
 
 How to read the counter columns:
 - "Global sectors per load request" is 32-byte sectors per warp-wide load instruction. 4 is
@@ -136,6 +141,7 @@ How to read the counter columns:
 | `v7_conflict_free` | 256 | 127 | 0 | 16,640 | 2 | 16/32 (50%) | 46% |
 | `v8_warptiling` | 256 | 126 | 0 | 16,640 | 2 | 16/32 (50%) | 46% |
 | `v9_autotuned` | 128 | 128 | 0 | 12,544 | 4 | 16/32 (50%) | 45% |
+| `v11_splitk` | 128 | 128 | 0 | 12,544 | 4 | 16/32 (50%) | 45% |
 
 ## The kernels, one idea at a time
 
@@ -153,10 +159,10 @@ A warp is 32 consecutive `threadIdx.x`, so one warp covers 32 *rows* and one col
 - Its loads of `B[k][col]` are a single address for the whole warp, a broadcast.
 - Its stores to C are strided like A.
 
-Measured: 61 GFLOP/s at N = 2048, 0.9% of cuBLAS.
-It moves 2,258 MB through DRAM, 44.9x the minimum.
+Measured: 62 GFLOP/s at N = 2048, 0.9% of cuBLAS.
+It moves 2,260 MB through DRAM, 44.9x the minimum.
 
-**A side finding: v0 is 2.9x faster at N = 1023 than at N = 1024.** v0 reaches 177
+**A side finding: v0 is 3.1x faster at N = 1023 than at N = 1024.** v0 reaches 184
 GFLOP/s at N = 1023 but only 60 at N = 1024, and this reproduced in every
 run. The obvious explanation would be extra cache misses from the power-of-two stride. The
 counters rule that out: DRAM traffic, L1 and L2 hit rates and sector counts are all
@@ -189,8 +195,8 @@ loads. A warp now covers one row and 32 adjacent columns:
 - `A[row][k]` becomes the broadcast.
 - The C stores are contiguous.
 
-Measured: **8.6x faster than v0** at N = 2048
-(531 GFLOP/s). Sectors per request drop from 16.5
+Measured: **9.1x faster than v0** at N = 2048
+(563 GFLOP/s). Sectors per request drop from 16.5
 to 2.5.
 
 New limit: every FMA still needs two global load instructions. They mostly hit in L1
@@ -209,11 +215,11 @@ There are two `__syncthreads()` per tile:
 
 Edge tiles are zero-padded, so sizes 1000 and 1023 need no special case.
 
-Measured: **1.31x vs v1** at N = 4096
-(707 GFLOP/s, 13.6% of cuBLAS).
+Measured: **1.20x vs v1** at N = 4096
+(762 GFLOP/s, 12.4% of cuBLAS).
 
 What the counters say:
-- **DRAM traffic barely changed** (1,688 → 1,667 MB).
+- **DRAM traffic barely changed** (1,688 → 1,663 MB).
   v1 was already getting its reuse from L1. The gain is in *instructions*: global loads became
   shared loads. ncu counts 1.250 shared loads per FMA, not the naive
   2, because the compiler reads each thread's A row with 128-bit loads (4 values at once).
@@ -228,8 +234,8 @@ it loads one B value and reuses it for 8 FMAs. The block tile is 64×64, 8 deep,
 threads, so 2 blocks fit on an SM. Per tile phase a block loads 1024
 floats for 32,768 FMAs, twice v2's reuse.
 
-Measured: **2.17x vs v2** at N = 4096
-(1,303 GFLOP/s).
+Measured: **2.27x vs v2** at N = 4096
+(1,425 GFLOP/s).
 - Shared loads per FMA fall to 0.375.
 - DRAM traffic falls to 672 MB, thanks to the larger tile.
 - 64 registers per thread, 0 bytes spilled.
@@ -247,11 +253,11 @@ bytes spilled. That leaves 50% theoretical occupancy
 FMAs per k step, so latency is hidden by instruction-level parallelism instead of by more
 threads.
 
-Measured: **2.06x vs v3**,
-2,505 GFLOP/s, 60.9% of cuBLAS at N = 4096.
+Measured: **2.15x vs v3**,
+2,777 GFLOP/s, 60.6% of cuBLAS at N = 4096.
 - Shared loads per FMA: 0.062, which is 4 per 64 FMAs. That means
   the compiler already uses 128-bit shared loads.
-- DRAM traffic is 224 MB (76.7 FLOP/byte, past the
+- DRAM traffic is 224 MB (76.8 FLOP/byte, past the
   roofline ridge).
 - ncu reports 33,554,432 shared-memory bank conflicts at N = 2048.
 
@@ -262,7 +268,7 @@ in shared memory, so a thread's 8 A values for one k are contiguous. When a row 
 aligned `float4` (K or N not a multiple of 4, as at 1023) or a chunk crosses the matrix edge, the
 loader falls back to guarded scalar loads.
 
-Measured: **0.95x vs v4** at N = 4096 and
+Measured: **0.93x vs v4** at N = 4096 and
 0.99x at N = 2048, so no real change.
 
 The counters explain why:
@@ -271,7 +277,7 @@ The counters explain why:
 - The bank-conflict count is unchanged (33,554,432).
 - Global loads were never the bottleneck. Per 8-deep tile, a thread does 512 FMAs and only 8
   global loads, so cutting those 8 to 2 saves almost nothing.
-- At N = 1023 v5 is slower than v4 (53.3% vs 59.5%
+- At N = 1023 v5 is slower than v4 (54.1% vs 60.2%
   of cuBLAS): every load takes the guarded scalar path, which costs more than v4's plain loads.
 
 This is a negative result, kept on purpose: measure before assuming an optimization helps.
@@ -284,8 +290,8 @@ one `__syncthreads()` per tile instead of two. The cost is 16 KB of shared memor
 (2 blocks still fit) and 127 registers, still within the 128 cap and
 with 0 bytes spilled.
 
-Measured: **1.02x vs v5** at N = 4096
-(2,556 GFLOP/s, 59.1% of cuBLAS) and
+Measured: **1.01x vs v5** at N = 4096
+(2,660 GFLOP/s, 56.6% of cuBLAS) and
 1.04x at N = 2048. A small gain: with 2 blocks
 per SM, the hardware was already overlapping one block's loads with the other's math.
 
@@ -302,12 +308,12 @@ contiguous bytes, which is conflict-free. The transposed A tile is padded from 1
 per row, so its stores no longer collide either. The output strips are now contiguous, so C is
 written with 128-bit stores.
 
-Measured: **1.39x vs v6** at N = 4096
-(3,104 GFLOP/s, 82.1% of cuBLAS) and
-1.29x at N = 2048. Bank conflicts at N = 2048:
-14,375 on loads and 137,505 on stores,
+Measured: **1.46x vs v6** at N = 4096
+(3,426 GFLOP/s, 82.7% of cuBLAS) and
+1.30x at N = 2048. Bank conflicts at N = 2048:
+14,089 on loads and 139,616 on stores,
 against 33,554,432 and 2,097,152 for v6.
-The shared-load conflict count fell 2,334x, and
+The shared-load conflict count fell 2,382x, and
 that alone bought the largest step since v4: the FFMA share of instructions, shared loads per
 FMA and DRAM traffic are essentially unchanged from v6 (table above). What changed is that each
 shared load now takes one pass instead of three.
@@ -317,7 +323,7 @@ shared load now takes one pass instead of three.
 for one warp and applies the bank rules.
 - For v5 and v6 it reproduces Nsight Compute's counts exactly.
 - For v7 and v8 it predicted zero. ncu measures a small residual of v6's count
-  that the model doesn't explain (0.04% for v7, 0.07% for v8), so it is reported here, not hidden.
+  that the model doesn't explain (0.04% for v7, 0.08% for v8), so it is reported here, not hidden.
 
 Shared-memory bank conflicts at N = 2048: the analytical model in [`scripts/bank_model.py`](scripts/bank_model.py) (lane addresses from the kernel source + the 32-bank / 8-lanes-per-128-bit-phase rule) next to Nsight Compute's counters:
 
@@ -325,8 +331,8 @@ Shared-memory bank conflicts at N = 2048: the analytical model in [`scripts/bank
 |---|---|---|---|---|
 | `v5_vectorized` | 33,554,432 | 33,554,432 | 2,097,152 | 2,097,152 |
 | `v6_double_buffered` | 33,554,432 | 33,554,432 | 2,097,152 | 2,097,152 |
-| `v7_conflict_free` | 0 | 14,375 | 0 | 137,505 |
-| `v8_warptiling` | 0 | 21,972 | 0 | 65,119 |
+| `v7_conflict_free` | 0 | 14,089 | 0 | 139,616 |
+| `v8_warptiling` | 0 | 28,144 | 0 | 70,979 |
 
 ### v8: warp tiling ([`v8_warptiling.cu`](src/kernels/v8_warptiling.cu))
 
@@ -341,8 +347,8 @@ cuts shared-memory bandwidth per FMA by a third. Reads stay conflict-free (see t
 above).
 
 Measured: **0.99x vs v7** at N = 4096
-(3,075 GFLOP/s, 81.4% of cuBLAS) and
-1.01x at N = 2048. 126 registers
+(3,404 GFLOP/s, 82.2% of cuBLAS) and
+1.00x at N = 2048. 126 registers
 per thread, 0 bytes spilled.
 Warp tiling bought nothing measurable on top of v7. That's consistent with v7's counters: once
 the conflicts were gone, shared-memory bandwidth was no longer the limit. So asking for fewer
@@ -363,56 +369,56 @@ SMs are idle the whole time.
 - At N = 256 a 128×128 tile gives 0.1 waves.
 - A 32×32 tile gives 0.1 waves.
 
-% of paired cuBLAS for each tile configuration (v7_<BM>x<BN>x<BK>_<TM>x<TN>: block tile, then thread tile; v8_<BM>x<BN>x<BK>_w<WM>x<WN>_<WMITER>x<WNITER>: block tile, warp tile, pieces per thread), from `results/tune_sgemm_Tesla_T4_2026-10-12_163301.csv`:
+% of paired cuBLAS for each tile configuration (v7_<BM>x<BN>x<BK>_<TM>x<TN>: block tile, then thread tile; v8_<BM>x<BN>x<BK>_w<WM>x<WN>_<WMITER>x<WNITER>: block tile, warp tile, pieces per thread), from `results/tune_sgemm_Tesla_T4_2026-10-12_170228.csv`:
 
 | config | threads | registers | blocks/SM | N=256 | N=512 | N=1000 | N=1023 | N=1024 | N=2048 | N=4096 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `v7_128x128x8_8x8` | 256 | 127 | 2 | 48% | 52% | 75% | 71% | 79% | 83% | 83% |
-| `v7_128x128x16_8x8` | 256 | 128 | 1 | 48% | 53% | 69% | 71% | 74% | 75% | 70% |
-| `v7_128x64x8_8x8` | 128 | 133 | 3 | 71% | 76% | 71% | 62% | 74% | 82% | 79% |
-| `v7_64x128x8_8x8` | 128 | 137 | 3 | 73% | 79% | 73% | 68% | 82% | 87% | 88% |
-| `v7_128x64x16_8x8` | 128 | 157 | 2 | 72% | 78% | 69% | 69% | 74% | 81% | 78% |
-| `v7_64x64x8_8x8` | 64 | 139 | 6 | 73% | 61% | 72% | 59% | 75% | 78% | 80% |
-| `v7_64x64x16_8x8` | 64 | 173 | 3 | 73% | 49% | 67% | 68% | 72% | 69% | 69% |
-| `v7_64x64x8_4x4` | 256 | 69 | 3 | 118% | 62% | 56% | 47% | 57% | 54% | 51% |
-| `v7_64x64x16_4x4` | 256 | 69 | 3 | 129% | 63% | 55% | 51% | 61% | 55% | 52% |
-| `v7_128x128x8_4x4` | 1024 | 63 | 1 | 39% | 42% | 52% | 48% | 53% | 53% | 49% |
-| `v7_64x32x8_4x4` | 128 | 71 | 7 | 131% | 55% | 53% | 41% | 51% | 45% | 44% |
-| `v7_32x32x8_4x4` | 64 | 71 | 14 | 113% | 55% | 48% | 37% | 47% | 42% | 42% |
-| `v8_128x128x8_w64x32_2x2` | 256 | 126 | 2 | 48% | 51% | 78% | 70% | 80% | 82% | 81% |
-| `v8_128x128x8_w32x64_2x2` | 256 | 126 | 2 | 48% | 51% | 78% | 71% | 79% | 82% | 82% |
-| `v8_128x128x16_w64x32_2x2` | 256 | 128 | 1 | 41% | 42% | 60% | 57% | 64% | 66% | 62% |
-| `v8_128x64x8_w64x32_2x2` | 128 | 137 | 3 | 76% | 77% | 76% | 64% | 76% | 84% | 80% |
-| `v8_64x64x8_w32x32_1x2` | 128 | 89 | 5 | 117% | 68% | 64% | 54% | 64% | 60% | 58% |
-| `v8_64x64x16_w32x32_1x2` | 128 | 103 | 3 | 123% | 71% | 64% | 57% | 67% | 63% | 61% |
-| `v10_64x128x8_8x8_b2_s0` | 128 | 137 | 3 | 74% | 75% | 77% | 68% | 80% | 87% | 89% |
-| `v10_64x128x8_8x8_b2_s8` | 128 | 143 | 3 | 74% | 76% | 77% | 68% | 79% | 87% | 90% |
-| `v10_64x128x8_8x8_b4_s0` | 128 | 128 | 4 | 72% | 75% | 77% | 70% | 79% | 89% | 90% |
-| `v10_64x128x8_8x8_b4_s8` | 128 | 128 | 4 | 74% | 77% | 78% | 72% | 80% | 89% | 87% |
-| `v10_128x64x8_8x8_b2_s8` | 128 | 141 | 3 | 74% | 75% | 76% | 63% | 75% | 83% | 78% |
-| `v10_128x64x8_8x8_b4_s0` | 128 | 127 | 4 | 73% | 74% | 79% | 67% | 75% | 83% | 80% |
-| `v10_64x128x8_8x4_b2_s0` | 256 | 86 | 2 | 82% | 83% | 70% | 58% | 76% | 77% | 72% |
-| `v10_64x128x8_4x8_b2_s0` | 256 | 85 | 2 | 75% | 71% | 61% | 51% | 65% | 66% | 59% |
-| `v10_64x128x8_4x8_b2_s8` | 256 | 89 | 2 | 77% | 70% | 60% | 51% | 63% | 65% | 57% |
-| `v10_128x128x8_8x8_b2_s8` | 256 | 128 | 2 | 46% | 49% | 77% | 70% | 78% | 80% | 78% |
-| `v10_64x64x8_8x8_b4_s0` | 64 | 139 | 6 | 73% | 57% | 74% | 59% | 79% | 78% | 81% |
-| `v10_64x64x8_8x8_b6_s8` | 64 | 156 | 6 | 71% | 49% | 75% | 60% | 77% | 78% | 82% |
-| `v10_32x128x8_4x8_b4_s0` | 128 | 95 | 5 | 109% | 67% | 62% | 49% | 67% | 61% | 61% |
-| `v10_128x32x8_8x4_b4_s0` | 128 | 91 | 5 | 108% | 64% | 66% | 49% | 64% | 59% | 57% |
-| `v10_64x128x4_8x8_b4_s8` | 128 | 126 | 4 | 69% | 72% | 71% | 63% | 74% | 81% | 75% |
-| `v10_64x128x8_8x8_b5_s0` | 128 | 96 | 5 | 46% | 49% | 62% | 64% | 65% | 75% | 77% |
-| `v10_64x128x8_8x8_b4_s4` | 128 | 128 | 4 | 88% | 78% | 78% | 72% | 81% | 89% | 85% |
-| `v10_64x128x8_8x8_b4_s16` | 128 | 128 | 4 | 74% | 78% | 78% | 73% | 81% | 89% | 90% |
-| `v10_96x128x8_8x8_b3_s0` | 192 | 96 | 3 | 31% | 33% | 49% | 50% | 51% | 63% | 64% |
-| `v10_64x192x8_8x8_b3_s0` | 192 | 96 | 3 | 35% | 36% | 53% | 55% | 56% | 67% | 69% |
-| `v10_64x256x8_8x8_b2_s0` | 256 | 128 | 2 | 47% | 50% | 74% | 74% | 79% | 82% | 87% |
-| `v10_128x64x8_8x8_b4_s8` | 128 | 128 | 4 | 58% | 62% | 68% | 61% | 70% | 79% | 75% |
+| `v7_128x128x8_8x8` | 256 | 127 | 2 | 48% | 53% | 75% | 73% | 80% | 81% | 82% |
+| `v7_128x128x16_8x8` | 256 | 128 | 1 | 49% | 52% | 69% | 73% | 75% | 75% | 69% |
+| `v7_128x64x8_8x8` | 128 | 133 | 3 | 74% | 76% | 71% | 63% | 75% | 82% | 79% |
+| `v7_64x128x8_8x8` | 128 | 137 | 3 | 75% | 78% | 74% | 71% | 80% | 87% | 89% |
+| `v7_128x64x16_8x8` | 128 | 157 | 2 | 74% | 77% | 69% | 71% | 75% | 81% | 77% |
+| `v7_64x64x8_8x8` | 64 | 139 | 6 | 73% | 58% | 72% | 60% | 76% | 78% | 81% |
+| `v7_64x64x16_8x8` | 64 | 173 | 3 | 75% | 49% | 67% | 68% | 73% | 69% | 69% |
+| `v7_64x64x8_4x4` | 256 | 69 | 3 | 129% | 66% | 55% | 47% | 58% | 53% | 50% |
+| `v7_64x64x16_4x4` | 256 | 69 | 3 | 128% | 64% | 54% | 53% | 59% | 56% | 51% |
+| `v7_128x128x8_4x4` | 1024 | 63 | 1 | 47% | 42% | 52% | 49% | 54% | 54% | 49% |
+| `v7_64x32x8_4x4` | 128 | 71 | 7 | 135% | 57% | 51% | 43% | 52% | 45% | 44% |
+| `v7_32x32x8_4x4` | 64 | 71 | 14 | 112% | 56% | 49% | 38% | 50% | 43% | 42% |
+| `v8_128x128x8_w64x32_2x2` | 256 | 126 | 2 | 49% | 52% | 79% | 73% | 83% | 84% | 82% |
+| `v8_128x128x8_w32x64_2x2` | 256 | 126 | 2 | 50% | 51% | 81% | 71% | 81% | 82% | 81% |
+| `v8_128x128x16_w64x32_2x2` | 256 | 128 | 1 | 42% | 43% | 59% | 57% | 67% | 65% | 62% |
+| `v8_128x64x8_w64x32_2x2` | 128 | 137 | 3 | 78% | 77% | 78% | 64% | 79% | 83% | 80% |
+| `v8_64x64x8_w32x32_1x2` | 128 | 89 | 5 | 117% | 68% | 65% | 52% | 65% | 60% | 58% |
+| `v8_64x64x16_w32x32_1x2` | 128 | 103 | 3 | 119% | 71% | 66% | 58% | 68% | 63% | 60% |
+| `v10_64x128x8_8x8_b2_s0` | 128 | 137 | 3 | 74% | 76% | 79% | 69% | 83% | 87% | 89% |
+| `v10_64x128x8_8x8_b2_s8` | 128 | 143 | 3 | 77% | 78% | 79% | 68% | 80% | 87% | 92% |
+| `v10_64x128x8_8x8_b4_s0` | 128 | 128 | 4 | 74% | 74% | 81% | 70% | 81% | 89% | 90% |
+| `v10_64x128x8_8x8_b4_s8` | 128 | 128 | 4 | 76% | 78% | 81% | 71% | 81% | 89% | 87% |
+| `v10_128x64x8_8x8_b2_s8` | 128 | 141 | 3 | 75% | 74% | 79% | 63% | 78% | 83% | 77% |
+| `v10_128x64x8_8x8_b4_s0` | 128 | 127 | 4 | 75% | 75% | 80% | 66% | 79% | 84% | 80% |
+| `v10_64x128x8_8x4_b2_s0` | 256 | 86 | 2 | 81% | 81% | 71% | 57% | 75% | 76% | 72% |
+| `v10_64x128x8_4x8_b2_s0` | 256 | 85 | 2 | 79% | 71% | 61% | 52% | 65% | 66% | 60% |
+| `v10_64x128x8_4x8_b2_s8` | 256 | 89 | 2 | 78% | 71% | 62% | 52% | 65% | 65% | 57% |
+| `v10_128x128x8_8x8_b2_s8` | 256 | 128 | 2 | 48% | 49% | 79% | 73% | 81% | 80% | 78% |
+| `v10_64x64x8_8x8_b4_s0` | 64 | 139 | 6 | 74% | 57% | 76% | 63% | 80% | 79% | 81% |
+| `v10_64x64x8_8x8_b6_s8` | 64 | 156 | 6 | 74% | 49% | 77% | 62% | 76% | 78% | 81% |
+| `v10_32x128x8_4x8_b4_s0` | 128 | 95 | 5 | 110% | 67% | 64% | 51% | 64% | 60% | 61% |
+| `v10_128x32x8_8x4_b4_s0` | 128 | 91 | 5 | 108% | 65% | 71% | 51% | 62% | 59% | 56% |
+| `v10_64x128x4_8x8_b4_s8` | 128 | 126 | 4 | 71% | 72% | 73% | 66% | 73% | 81% | 75% |
+| `v10_64x128x8_8x8_b5_s0` | 128 | 96 | 5 | 51% | 49% | 64% | 62% | 64% | 75% | 78% |
+| `v10_64x128x8_8x8_b4_s4` | 128 | 128 | 4 | 75% | 78% | 81% | 74% | 80% | 89% | 85% |
+| `v10_64x128x8_8x8_b4_s16` | 128 | 128 | 4 | 77% | 80% | 81% | 74% | 83% | 89% | 90% |
+| `v10_96x128x8_8x8_b3_s0` | 192 | 96 | 3 | 32% | 36% | 51% | 51% | 51% | 63% | 63% |
+| `v10_64x192x8_8x8_b3_s0` | 192 | 96 | 3 | 36% | 36% | 55% | 55% | 54% | 66% | 68% |
+| `v10_64x256x8_8x8_b2_s0` | 256 | 128 | 2 | 47% | 49% | 77% | 75% | 78% | 83% | 86% |
+| `v10_128x64x8_8x8_b4_s8` | 128 | 128 | 4 | 60% | 62% | 72% | 62% | 70% | 78% | 74% |
 
-Best configuration per size: N = 256: `v7_64x32x8_4x4` (131%, 0.1 waves); N = 512: `v10_64x128x8_8x4_b2_s0` (83%, 0.4 waves); N = 1000: `v10_128x64x8_8x8_b4_s0` (79%, 0.8 waves); N = 1023: `v10_64x256x8_8x8_b2_s0` (74%, 0.8 waves); N = 1024: `v7_64x128x8_8x8` (82%, 1.1 waves); N = 2048: `v10_64x128x8_8x8_b4_s16` (89%, 3.2 waves); N = 4096: `v10_64x128x8_8x8_b4_s16` (90%, 12.8 waves).
+Best configuration per size: N = 256: `v7_64x32x8_4x4` (135%, 0.1 waves); N = 512: `v10_64x128x8_8x4_b2_s0` (81%, 0.4 waves); N = 1000: `v10_64x128x8_8x8_b4_s16` (81%, 0.8 waves); N = 1023: `v10_64x256x8_8x8_b2_s0` (75%, 0.8 waves); N = 1024: `v8_128x128x8_w64x32_2x2` (83%, 0.8 waves); N = 2048: `v10_64x128x8_8x8_b4_s0` (89%, 3.2 waves); N = 4096: `v10_64x128x8_8x8_b2_s8` (92%, 17.1 waves).
 
 What the sweep shows:
 - **Large sizes:** `v7_64x128x8_8x8` beats the default 128×128 tile
-  (88.3% vs 82.6% at N = 4096). With
+  (89.2% vs 82.0% at N = 4096). With
   128 threads per block, 3 blocks fit on an SM instead of 2.
 - **Deeper K tiles (BK = 16) are consistently worse.** They double shared memory per block, so
   fewer blocks fit on an SM, and that outweighs halving the barriers.
@@ -437,12 +443,12 @@ Results for the 64×128 tile at N = 4096:
 
 | config | registers | blocks/SM | % of cuBLAS |
 |---|---|---|---|
-| `v10_64x128x8_8x8_b2_s0` (= v7's best shape) | 137 | 3 | 88.6% |
-| `v10_64x128x8_8x8_b4_s0` (128-register cap) | 128 | 4 | 90.0% |
-| `v10_64x128x8_8x8_b2_s8` (swizzle only) | 143 | 3 | 90.2% |
-| `v10_64x128x8_8x8_b4_s4` (cap + swizzle 4) | 128 | 4 | 85.2% |
-| `v10_64x128x8_8x8_b4_s8` (cap + swizzle 8) | 128 | 4 | 86.8% |
-| `v10_64x128x8_8x8_b4_s16` (cap + swizzle 16) | 128 | 4 | 90.3% |
+| `v10_64x128x8_8x8_b2_s0` (= v7's best shape) | 137 | 3 | 89.1% |
+| `v10_64x128x8_8x8_b4_s0` (128-register cap) | 128 | 4 | 90.3% |
+| `v10_64x128x8_8x8_b2_s8` (swizzle only) | 143 | 3 | 92.4% |
+| `v10_64x128x8_8x8_b4_s4` (cap + swizzle 4) | 128 | 4 | 85.3% |
+| `v10_64x128x8_8x8_b4_s8` (cap + swizzle 8) | 128 | 4 | 86.9% |
+| `v10_64x128x8_8x8_b4_s16` (cap + swizzle 16) | 128 | 4 | 89.6% |
 
 - **Capping registers worked.** At 128 registers per thread the compiler still didn't spill
   (0 bytes of local memory), and a
@@ -474,6 +480,7 @@ Static instruction counts in each kernel's compiled machine code (SASS, from `cu
 | `v6_double_buffered` | 976 | 512 | 32 | 32 | 20 | 4 | 10 | 2 | 64 | 0 | 2 | 0.062 |
 | `v7_conflict_free` | 1,339 | 512 | 32 | 32 | 20 | 4 | 10 | 2 | 128 | 16 | 2 | 0.062 |
 | `v8_warptiling` | 1,345 | 512 | 32 | 32 | 20 | 4 | 10 | 2 | 128 | 16 | 2 | 0.062 |
+| `v11_splitk` | 1,809 | 512 | 32 | 32 | 42 | 6 | 12 | 4 | 80 | 16 | 2 | 0.062 |
 
 Three claims made earlier are confirmed in the machine code:
 - **v4** already reads shared memory only with `LDS.128`, though its source uses scalar reads.
@@ -497,17 +504,17 @@ problem size. The choices it makes:
 
 Because the best of many noisy measurements is biased upward, v9 is **measured again in its own
 benchmark run**, and only that number is reported:
-- **89.0% of cuBLAS at N = 4096**, 1.08x
+- **88.6% of cuBLAS at N = 4096**, 1.07x
   vs v7;
-- **122.2% at N = 256**, where it beats cuBLAS (909 vs
-  750 GFLOP/s).
+- **124.5% at N = 256**, where it beats cuBLAS (1,010 vs
+  793 GFLOP/s).
 **Winner's-curse check.** At N = 4096 the independent measurement
-(89.0%) matches what the tuning run recorded for that configuration
-(91.9%). At N = 256 it comes in lower (122.2% vs
+(88.6%) matches what the tuning run recorded for that configuration
+(91.9%). At N = 256 it comes in lower (124.5% vs
 126.4%): small kernels take tens of microseconds, so their measurements are
 noisier, and picking the best of 18 of them inflates the winner the most. v9 still beats cuBLAS
 there. At N = 1024 the dispatched configuration (81.1%) is slightly below the
-default v7 (79.3%) in this run, for the same reason.
+default v7 (80.4%) in this run, for the same reason.
 
 ### Tensor-core track (separate precision)
 
@@ -524,14 +531,16 @@ against SGEMM, and it never appears in the FP32 tables. Two kernels:
 - [`tc1_wmma_smem.cu`](src/kernels/tc1_wmma_smem.cu): a 128×128 block tile staged in shared
   memory, with rows padded 8 halves to spread banks. Each of 8 warps owns 64×32 = 4×2 fragments.
 
-TFLOP/s (and % of `cublasGemmEx`, timed interleaved), from `results/tc_sgemm_Tesla_T4_2026-10-12_163255.csv`. Every kernel is checked against `cublasGemmEx` with the same FP16 inputs (largest observed error 1.0e-06).
+TFLOP/s (and % of `cublasGemmEx`, timed interleaved), from `results/tc_sgemm_Tesla_T4_2026-10-12_170220.csv`. Every kernel is checked against `cublasGemmEx` with the same FP16 inputs (largest observed error 1.0e-06).
 
 | kernel | N=256 | N=512 | N=1024 | N=2048 | N=4096 |
 |---|---|---|---|---|---|
-| `cublasGemmEx` (FP16 in, FP32 out) | 2.3 | 12.3 | 32.5 | 40.3 | 21.5 |
-| `tc0_wmma_naive` | 2.1 (101%) | 3.4 (28%) | 3.7 (11%) | 1.8 (8%) | 1.2 (7%) |
-| `tc1_wmma_smem` | 1.8 (86%) | 8.8 (72%) | 23.6 (72%) | 26.5 (68%) | 11.5 (64%) |
-| `tc2_wmma_db` | 2.1 (101%) | 10.6 (89%) | 22.9 (70%) | 24.4 (64%) | 11.2 (59%) |
+| `cublasGemmEx` (FP16 in, FP32 out) | 2.2 | 11.9 | 32.6 | 40.4 | 43.7 |
+| `tc0_wmma_naive` | 2.1 (99%) | 3.4 (28%) | 3.7 (11%) | 2.0 (8%) | 1.4 (7%) |
+| `tc1_wmma_smem` | 1.8 (87%) | 8.8 (74%) | 23.8 (72%) | 26.8 (72%) | 12.6 (63%) |
+| `tc2_wmma_db` | 2.1 (109%) | 10.9 (91%) | 22.9 (69%) | 26.1 (69%) | 12.0 (59%) |
+| `tc3_ptx_mma` | 1.7 (112%) | 9.9 (83%) | 23.6 (71%) | 26.4 (67%) | 12.5 (60%) |
+| `tc4_ptx_bk32` | 1.8 (85%) | 8.5 (71%) | 22.9 (70%) | 26.0 (66%) | 12.4 (60%) |
 
 Precision cost of FP16 inputs (not a kernel error): normwise relative difference between the FP16-input result and FP32 SGEMM on the same data: N = 256: 2.8e-04; N = 512: 2.7e-04; N = 1024: 2.8e-04; N = 2048: 2.8e-04; N = 4096: 2.6e-04.
 
@@ -540,22 +549,52 @@ Precision cost of FP16 inputs (not a kernel error): normwise relative difference
   barrier per tile. The K tile is cut from 32 to 16 so both buffers still let 2 blocks share an
   SM.
 
-At N = 4096, `tc1` runs **9.6x faster than `tc0`** and
+At N = 4096, `tc1` runs **8.9x faster than `tc0`** and
 3.7x the throughput of the fastest FP32 kernel, at
-64.0% of `cublasGemmEx`. `tc2` vs `tc1`:
-0.9x at N = 2048 (64.2% of
-`cublasGemmEx`), with the tensor pipe busy 51.5% of the time.
+62.7% of `cublasGemmEx`. `tc2` vs `tc1`:
+1.0x at N = 2048 (69.3% of
+`cublasGemmEx`), with the tensor pipe busy 51.6% of the time.
 **Double buffering only paid off at small sizes.**
-- At N = 512, tc2 beats tc1: 88.9% vs 72.4% of
+- At N = 512, tc2 beats tc1: 91.2% vs 73.6% of
   `cublasGemmEx`.
-- From N = 1024 up it's slower: 64.2% vs 68.1% at
+- From N = 1024 up it's slower: 69.3% vs 72.0% at
   N = 2048. To fit two buffers and still keep 2 blocks per SM, tc2 halves the K tile. That
   halves the MMAs between barriers and doubles the load rounds per unit of K, and once the grid
   fills the GPU this costs more than the overlap saves.
-- Tensor pipe busy: 51.5% for tc2 vs 54.5% for tc1. This is
+- Tensor pipe busy: 51.6% for tc2 vs 54.5% for tc1. This is
   another measured negative result, kept for the same reason as v5.
+
+- [`tc3_ptx_mma.cu`](src/kernels/tc3_ptx_mma.cu): the same tiling as tc2, written without WMMA.
+  It uses the PTX instructions WMMA hides: `ldmatrix.sync…x4` (one instruction loads four 8×8
+  FP16 matrices into the exact register layout the MMA expects; `.trans` handles B) and
+  `mma.sync.aligned.m16n8k8`, Turing's native tensor-core instruction. Its fragment index math
+  was checked before the GPU run against a CPU emulation of both instructions, written from the
+  PTX ISA's layout definitions.
+
+`tc3` vs `tc2`: 1.0x at N = 2048
+(66.6% of `cublasGemmEx`), tensor pipe busy 52.6%.
+tc3 passes the check at every size, so the hand-written fragment layouts are right on real
+hardware. It is **not faster than tc2**, which has the same tiling: tc3 changed the instructions,
+not the schedule, and the schedule is what held tc2 back. It also reached the 128-register cap
+and spilled 16 bytes per thread, because the
+prefetched tile is held in registers.
+
+- [`tc4_ptx_bk32.cu`](src/kernels/tc4_ptx_bk32.cu): tc3's PTX inner loop with tc1's schedule
+  (32-deep K tile, single buffer, two 16-deep MMA steps per barrier, no prefetch registers).
+  This separates the two effects: instruction path (PTX vs WMMA) and schedule (K depth).
+
+`tc4`: 66.4% of `cublasGemmEx` at N = 2048 (tc1:
+72.0%), 26.0 TFLOP/s, spills
+16 bytes per thread.
+**Hand-written PTX did not beat WMMA, and the machine code shows why.** The compiler already
+lowers tc1's WMMA calls to the same instructions: its SASS contains
+24 `LDSM` (the machine form of `ldmatrix`) and
+64 `HMMA` (tensor-core MMA) instructions. Writing them by hand bought
+control but no new capability on Turing, and tc4 also spills at the 128-register cap. The
+tensor-core track therefore stops at tc1 as its best kernel. The lesson generalises: read the
+SASS before assuming hand-written assembly will win.
 The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
-- **`tc0`** moves 1,474 MB through DRAM, and its tensor pipe is busy only
+- **`tc0`** moves 1,459 MB through DRAM, and its tensor pipe is busy only
   6.0% of the time: the tensor cores mostly wait for data.
 - **`tc1`** stages tiles in shared memory, cutting traffic to 101 MB, and
   the tensor pipe is busy 54.5% of the time.
@@ -564,6 +603,44 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
 - **Precision cost of FP16 inputs** (vs FP32 SGEMM on the same data): 2.8e-04 normwise
   relative error at N = 2048. That's acceptable for many workloads, but not interchangeable with
   SGEMM.
+
+### Real-world shapes
+
+Square matrices are the textbook case. Transformer layers multiply rectangles: M = tokens, and
+N and K are model or feed-forward widths. `./bench --shapes` runs v4, v7 and v9 on such shapes.
+v9's dispatch table was tuned on squares only, so this tests how well the tuning generalises.
+
+M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of paired cuBLAS, from `results/shapes_sgemm_Tesla_T4_2026-10-12_170421.csv`:
+
+| shape | cuBLAS GFLOP/s | v4 | v7 | v9 | v11 |
+|---|---|---|---|---|---|
+| 4096 × 4096 × 4096 | 3,148 | 61% | 82% | 89% | 90% |
+| 2048 × 768 × 768 | 5,935 | 53% | 75% | 88% | 80% |
+| 2048 × 3072 × 768 | 6,116 | 62% | 94% | 125% | 100% |
+| 2048 × 768 × 3072 | 6,878 | 55% | 82% | 100% | 84% |
+| 4096 × 1024 × 4096 | 3,277 | 61% | 82% | 88% | 87% |
+| 512 × 4096 × 4096 | 4,102 | 56% | 72% | 82% | 87% |
+| 128 × 4096 × 4096 | 6,540 | 51% | 70% | 71% | 90% |
+| 4096 × 4096 × 128 | 6,231 | 47% | 96% | 98% | 97% |
+What generalises:
+- **Wide shapes.** v9, tuned only on squares, reaches 88.4%
+  on 4096 × 1024 × 4096 and 88.4% on 2048 × 768 × 768. Shapes
+  this small finish in tens of microseconds, so their percentages move several points between
+  sessions; compare them within one table, not across runs.
+- **Small K.** With K = 128 it is level with cuBLAS (98.2%).
+
+What doesn't:
+- **Skinny M.** At M = 128, v9 drops to 71.3%. A 64-row tile
+  gives just 2 block-rows × 32 block-columns = 64 blocks for 40 SMs × 4 slots, so most of the
+  GPU idles.
+
+**v11: split-K** ([`v11_splitk.cu`](src/kernels/v11_splitk.cu)) fixes exactly that case.
+- Blocks along a third grid dimension each sum one slice of K, and the slices are combined with
+  `atomicAdd`.
+- The launcher picks enough slices for about two waves of blocks, and 1 slice (exactly v10)
+  when the grid already fills the GPU.
+- Skinny M = 128: 89.6% of cuBLAS (v9:
+  71.3%).
 
 ### What still separates the best kernel from cuBLAS
 
@@ -574,6 +651,45 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   using 128-thread blocks.
 - **What cuBLAS-class kernels add:** per-architecture hand-tuned SASS, larger K pipelines, and
   heuristics over many more shapes than 18.
+
+## Side study: parallel reduction
+
+A second classic kernel, measured the same way: sum 64 Mi floats, one idea per step
+([`src/reduce.cu`](src/reduce.cu)).
+
+| Kernel | What changes |
+|---|---|
+| `r0` | interleaved tree in shared memory, with divergent warps |
+| `r1` | contiguous active threads, but bank-conflicting indices |
+| `r2` | sequential addressing: no divergence, no conflicts |
+| `r3` | add two elements during the load |
+| `r4` | finish the last 32 values with warp shuffles |
+| `r5` | grid-stride `float4` loads into a register sum, one atomic per block |
+
+A reduction does one add per 4-byte element, so it is **bandwidth-bound**. The yardstick is
+therefore the measured DRAM bandwidth and CUB's `DeviceReduce::Sum`, not FLOPs. Each result is
+checked against a double-precision host sum.
+
+Sum of 67,108,864 floats (256 MiB), from `results/reduce_Tesla_T4_2026-10-12_170438.csv`. Bandwidth = input bytes / median time, compared with the 320 GB/s DRAM spec. (The measured copy bandwidth, 235 GB/s, isn't the right roof here: a copy reads and writes, while a reduction only reads, and a read-only stream gets closer to the spec.)
+
+| kernel | median ms | GB/s | % of DRAM spec | % of CUB | relative error | check |
+|---|---|---|---|---|---|---|
+| CUB `DeviceReduce::Sum` | 1.002 | 268 | 84% | 100% (ref) | 2.8e-08 | REF |
+| `r0_interleaved` | 3.418 | 79 | 25% | 29% | 2.8e-08 | PASS |
+| `r1_strided_index` | 3.781 | 71 | 22% | 27% | 2.8e-08 | PASS |
+| `r2_sequential` | 2.940 | 91 | 29% | 34% | 2.8e-08 | PASS |
+| `r3_first_add` | 1.663 | 161 | 50% | 60% | 3.1e-08 | PASS |
+| `r4_warp_shuffle` | 1.227 | 219 | 68% | 82% | 3.1e-08 | PASS |
+| `r5_grid_stride` | 0.968 | 277 | 87% | 103% | 3.3e-07 | PASS |
+- **The big steps:** `r3` (adding during the load, 1.8x vs
+  r2) and `r4` (finishing with warp shuffles, 1.4x vs
+  r3). Both cut the work done per byte loaded, not the bytes themselves.
+- **`r5` reaches 277 GB/s, 103% of CUB.** That's
+  above the copy kernel's figure, because a copy has to read *and* write while a reduction only
+  reads.
+- **Divergence vs bank conflicts:** `r1` is *slower* than `r0` here
+  (0.9x): its strided shared-memory indices cost
+  more than the warp divergence they remove.
 
 ## Methodology
 
@@ -590,7 +706,7 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   under sustained load. A cuBLAS time taken at the start of a size and a kernel time taken a
   minute later aren't comparable. So each timed kernel run is immediately followed by a timed
   cuBLAS run, and "% of cuBLAS" uses that paired median. The standalone cuBLAS row in the
-  tables is kept for transparency; it can differ from the paired figure (4,327
+  tables is kept for transparency; it can differ from the paired figure (4,628
   GFLOP/s at N = 4096) because it ran in a different thermal state. The clock table follows
   the list.
 - **Run-to-run variation.** Separate Colab sessions get different GPUs and thermal states
@@ -603,8 +719,8 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   (`cudaFuncGetAttributes`, `cudaOccupancyMaxActiveBlocksPerMultiprocessor`).
 - **Clock-locked cross-check.** Colab allowed `nvidia-smi -lgc 900,900`, so the whole benchmark
   was also run with the SM clock locked. The relative results hold:
-  83.3% of cuBLAS for v7 at N = 4096 with the clock locked,
-  vs 82.1% unlocked. At N = 4096 the power cap still pulled the clock
+  83.0% of cuBLAS for v7 at N = 4096 with the clock locked,
+  vs 82.7% unlocked. At N = 4096 the power cap still pulled the clock
   below the lock (table below), because a lock can't override the 70 W limit.
 - **Not measured:** the clock *during* each kernel (only sampled right after) and per-kernel
   energy.
@@ -613,54 +729,57 @@ Throttling at N = 4096: SM clock and board power sampled by `nvidia-smi` right a
 
 | kernel | GFLOP/s | SM clock after (MHz) | power after (W) | % of peak at that clock |
 |---|---|---|---|---|
-| cuBLAS | 3,552 | 780 | 67.3 | 89% |
-| `v1_coalesced` | 499 | 870 | 81.3 | 11% |
-| `v2_smem_tiling` | 707 | 795 | 67.0 | 17% |
-| `v3_1d_blocktiling` | 1,303 | 540 | 61.7 | 47% |
-| `v4_2d_blocktiling` | 2,505 | 675 | 64.4 | 72% |
-| `v5_vectorized` | 2,532 | 690 | 60.1 | 72% |
-| `v6_double_buffered` | 2,556 | 870 | 61.1 | 57% |
-| `v7_conflict_free` | 3,104 | 885 | 63.0 | 69% |
-| `v8_warptiling` | 3,075 | 840 | 68.0 | 71% |
-| `v9_autotuned` | 2,937 | 870 | 41.5 | 66% |
+| cuBLAS | 3,873 | 810 | 68.4 | 93% |
+| `v1_coalesced` | 535 | 660 | 67.2 | 16% |
+| `v2_smem_tiling` | 762 | 645 | 68.1 | 23% |
+| `v3_1d_blocktiling` | 1,425 | 870 | 49.4 | 32% |
+| `v4_2d_blocktiling` | 2,777 | 1065 | 38.8 | 51% |
+| `v5_vectorized` | 2,623 | 855 | 75.1 | 60% |
+| `v6_double_buffered` | 2,660 | 960 | 66.3 | 54% |
+| `v7_conflict_free` | 3,426 | 735 | 63.3 | 91% |
+| `v8_warptiling` | 3,404 | 780 | 54.3 | 85% |
+| `v9_autotuned` | 3,246 | 720 | 36.3 | 88% |
+| `v11_splitk` | 3,156 | 870 | 66.3 | 71% |
 
-Clock-locked run (`results/locked900_sgemm_Tesla_T4_2026-10-12_163609.csv`), N = 4096:
+Clock-locked run (`results/locked900_sgemm_Tesla_T4_2026-10-12_170542.csv`), N = 4096:
 
 | kernel | GFLOP/s | % cuBLAS | median ms | min – p90 ms | SM clock after (MHz) |
 |---|---|---|---|---|---|
-| cuBLAS | 2,670 | 100% (ref) | 51.48 | 31.16 – 51.98 | 765 |
-| `v1_coalesced` | 404 | 11.7% | 339.94 | 314.87 – 340.91 | 825 |
-| `v2_smem_tiling` | 589 | 13.9% | 233.37 | 222.98 – 234.75 | 585 |
-| `v3_1d_blocktiling` | 1,226 | 30.0% | 112.08 | 95.71 – 113.28 | 765 |
-| `v4_2d_blocktiling` | 2,197 | 61.3% | 62.55 | 47.19 – 63.11 | 840 |
-| `v5_vectorized` | 2,286 | 56.5% | 60.13 | 47.62 – 60.81 | 810 |
-| `v6_double_buffered` | 2,347 | 59.7% | 58.57 | 46.33 – 59.88 | 630 |
-| `v7_conflict_free` | 2,880 | 83.3% | 47.71 | 35.28 – 48.87 | 645 |
-| `v8_warptiling` | 2,880 | 81.3% | 47.72 | 35.22 – 48.72 | 720 |
-| `v9_autotuned` | 2,806 | 89.3% | 48.98 | 34.76 – 49.29 | 810 |
+| cuBLAS | 2,744 | 100% (ref) | 50.09 | 31.01 – 51.48 | 540 |
+| `v1_coalesced` | 406 | 11.8% | 338.68 | 306.30 – 397.17 | 450 |
+| `v2_smem_tiling` | 586 | 13.7% | 234.60 | 222.99 – 235.97 | 645 |
+| `v3_1d_blocktiling` | 1,214 | 30.5% | 113.17 | 95.71 – 114.43 | 840 |
+| `v4_2d_blocktiling` | 2,183 | 60.7% | 62.96 | 47.22 – 63.77 | 780 |
+| `v5_vectorized` | 2,292 | 56.9% | 59.97 | 47.53 – 60.76 | 795 |
+| `v6_double_buffered` | 2,349 | 59.8% | 58.52 | 46.34 – 59.77 | 675 |
+| `v7_conflict_free` | 2,877 | 83.0% | 47.78 | 35.29 – 49.27 | 615 |
+| `v8_warptiling` | 2,903 | 81.9% | 47.34 | 35.22 – 48.44 | 855 |
+| `v9_autotuned` | 2,805 | 89.1% | 49.00 | 34.76 – 49.46 | 615 |
+| `v11_splitk` | 2,737 | 89.7% | 50.22 | 35.53 – 50.56 | 900 |
 
-Median GFLOP/s at N = 2048 in each of the 7 committed runs (separate Colab sessions):
+Median GFLOP/s at N = 2048 in each of the 8 committed runs (separate Colab sessions):
 
 | kernel | runs | lowest | highest | spread |
 |---|---|---|---|---|
-| cuBLAS | 7 | 4,465 | 6,921 | 55% |
-| `v0_naive` | 7 | 61 | 62 | 1% |
-| `v1_coalesced` | 7 | 530 | 625 | 18% |
-| `v2_smem_tiling` | 6 | 775 | 849 | 10% |
-| `v3_1d_blocktiling` | 5 | 1,533 | 1,724 | 12% |
-| `v4_2d_blocktiling` | 5 | 2,853 | 3,649 | 28% |
-| `v5_vectorized` | 5 | 2,850 | 3,089 | 8% |
-| `v6_double_buffered` | 4 | 2,940 | 3,617 | 23% |
-| `v7_conflict_free` | 3 | 3,306 | 3,592 | 9% |
-| `v8_warptiling` | 3 | 3,398 | 3,580 | 5% |
-| `v9_autotuned` | 2 | 3,265 | 3,348 | 3% |
+| cuBLAS | 8 | 4,465 | 6,921 | 55% |
+| `v0_naive` | 8 | 61 | 62 | 1% |
+| `v1_coalesced` | 8 | 530 | 625 | 18% |
+| `v2_smem_tiling` | 7 | 775 | 849 | 10% |
+| `v3_1d_blocktiling` | 6 | 1,533 | 1,724 | 12% |
+| `v4_2d_blocktiling` | 6 | 2,853 | 3,649 | 28% |
+| `v5_vectorized` | 6 | 2,850 | 3,089 | 8% |
+| `v6_double_buffered` | 5 | 2,940 | 3,617 | 23% |
+| `v7_conflict_free` | 4 | 3,306 | 3,729 | 13% |
+| `v8_warptiling` | 4 | 3,398 | 3,671 | 8% |
+| `v9_autotuned` | 3 | 3,265 | 3,607 | 10% |
+| `v11_splitk` | 1 | 3,614 | 3,614 | 0% |
 
 Environment of the headline run:
 
 - GPU: **Tesla T4** (compute capability 7.5), 40 SMs, max SM clock 1590 MHz, L2 4 MB, shared memory 64 KB/SM
 - CUDA runtime 13.0, nvcc 13.0.88 (`-O3 -arch=sm_75`), driver 580.82.07, cuBLAS 130101
-- Run 2026-10-12T16:32:13Z: 3 warm-ups + 20 timed runs per point, inputs uniform[-1,1], mt19937 seed 42
-- SM clock, temperature, power at start: 585 MHz, 55 C, 30.69 W (limit 70.00 W); at end: 1410 MHz, 73 C, 41.55 W (limit 70.00 W)
+- Run 2026-10-12T17:01:37Z: 3 warm-ups + 20 timed runs per point, inputs uniform[-1,1], mt19937 seed 42
+- SM clock, temperature, power at start: 585 MHz, 45 C, 28.25 W (limit 70.00 W); at end: 1410 MHz, 66 C, 66.32 W (limit 70.00 W)
 
 Measured DRAM bandwidth:
 
@@ -668,28 +787,30 @@ Buffer 512 MiB in + out (far larger than L2); spec 320 GB/s:
 
 | method | GB/s (median) | GB/s (best run) | % of spec |
 |---|---|---|---|
-| `copy_float4` | 230.3 | 231.1 | 72% |
-| `copy_float` | 201.2 | 203.6 | 63% |
-| `cudaMemcpy_d2d` | 235.8 | 236.3 | 74% |
+| `copy_float4` | 228.7 | 229.6 | 71% |
+| `copy_float` | 201.0 | 201.6 | 63% |
+| `cudaMemcpy_d2d` | 235.2 | 236.0 | 73% |
 
 Source files for every number above:
 
-- `results/sgemm_Tesla_T4_2026-10-12_163213.csv`
-- `results/env_Tesla_T4_2026-10-12_163213.json`
-- `results/kernels_Tesla_T4_2026-10-12_163213.csv`
-- `results/bandwidth_Tesla_T4_2026-10-12_163458.csv`
-- `results/ncu_dram_2026-10-12_163107.csv`
-- `results/ncu_mem_2026-10-12_163107.csv`
-- `results/ncu_smem_2026-10-12_163107.csv`
+- `results/sgemm_Tesla_T4_2026-10-12_170137.csv`
+- `results/env_Tesla_T4_2026-10-12_170137.json`
+- `results/kernels_Tesla_T4_2026-10-12_170137.csv`
+- `results/bandwidth_Tesla_T4_2026-10-12_170439.csv`
+- `results/ncu_dram_2026-10-12_170008.csv`
+- `results/ncu_mem_2026-10-12_170008.csv`
+- `results/ncu_smem_2026-10-12_170008.csv`
 - `results/ncu_v0stride_1023_2026-10-12_163107.csv`
 - `results/ncu_v0set_1023_2026-10-12_163107.csv`
 - `results/ncu_v0stride_1024_2026-10-12_163107.csv`
 - `results/ncu_v0set_1024_2026-10-12_163107.csv`
-- `results/sass_2026-10-12_163107.txt.gz`
-- `results/tune_sgemm_Tesla_T4_2026-10-12_163301.csv`
-- `results/locked900_sgemm_Tesla_T4_2026-10-12_163609.csv`
-- `results/tc_sgemm_Tesla_T4_2026-10-12_163255.csv`
+- `results/sass_2026-10-12_170008.txt.gz`
+- `results/tune_sgemm_Tesla_T4_2026-10-12_170228.csv`
+- `results/locked900_sgemm_Tesla_T4_2026-10-12_170542.csv`
+- `results/tc_sgemm_Tesla_T4_2026-10-12_170220.csv`
 - `results/model_bank_conflicts.csv`
+- `results/reduce_Tesla_T4_2026-10-12_170438.csv`
+- `results/shapes_sgemm_Tesla_T4_2026-10-12_170421.csv`
 
 ## Reproduce
 
