@@ -84,6 +84,12 @@ class Data:
             self.tune, self.tune_path = pd.read_csv(p), p
             rp = p.with_name(p.name.replace("tune_sgemm_", "tune_kernels_", 1))
             self.tune_res = pd.read_csv(rp) if rp.exists() else None
+        self.tc, self.tc_path, self.tc_prec = None, None, None
+        p = newest("tc_sgemm_*.csv")
+        if p is not None:
+            self.tc, self.tc_path = pd.read_csv(p), p
+            pp = p.with_name(p.name.replace("tc_sgemm_", "tc_precision_", 1))
+            self.tc_prec = pd.read_csv(pp) if pp.exists() else None
         self.locked, self.locked_path = None, None
         p = newest("locked*_sgemm_*.csv")
         if p is not None:
@@ -245,6 +251,24 @@ class Data:
             if g.empty or "waves" not in g:
                 raise Missing(f"waves {args[0]} at N={args[1]}")
             return f"{g.waves.iloc[0]:.1f}"
+        if name == "tc_tflops":  # {{tc_tflops:K:N}} (K may be cublas = cublasGemmEx)
+            return f"{self.tc_row(args[0], args[1]).gflops / 1000:.1f}"
+        if name == "tc_pct":
+            return f"{self.tc_row(args[0], args[1]).pct_cublas:.1f}%"
+        if name == "tc_speedup":  # {{tc_speedup:K1:K2:N}}
+            a, b = self.tc_row(args[0], args[2]).gflops, self.tc_row(args[1], args[2]).gflops
+            return f"{a / b:.1f}x"
+        if name == "tc_vs_fp32":  # {{tc_vs_fp32:K:N}} tensor-core GFLOP/s / best FP32 kernel's
+            n = int(args[1])
+            d = self.df[(self.df.M == n) & (self.df.status == "PASS")]
+            return f"{self.tc_row(args[0], n).gflops / d.gflops.max():.1f}x"
+        if name == "tc_prec":  # {{tc_prec:N}}
+            if self.tc_prec is None:
+                raise Missing("tc_precision_*.csv")
+            r = self.tc_prec[self.tc_prec.N == int(args[0])]
+            if r.empty:
+                raise Missing(f"tc precision at N={args[0]}")
+            return f"{r.max_rel_err_fp16_inputs_vs_fp32_sgemm.iloc[0]:.1e}"
         if name == "locked_clock":
             if self.locked is None or "sm_clock_mhz_after" not in self.locked:
                 raise Missing("locked run")
@@ -490,6 +514,45 @@ class Data:
                            + [f"N={s}" for s in sizes], rows)
                 + "\n\nBest configuration per size: " + "; ".join(best) + "." + note)
 
+    def tc_row(self, k, n):
+        if self.tc is None:
+            raise Missing("tc_sgemm_*.csv")
+        r = self.tc[(self.tc.kernel == k) & (self.tc.M == int(n))]
+        if r.empty or r.status.iloc[0] == "FAILED":
+            raise Missing(f"tc {k} at N={n}")
+        return r.iloc[0]
+
+    def t_tc(self):
+        if self.tc is None:
+            raise Missing("tc_sgemm_*.csv")
+        d = self.tc
+        sizes = sorted(d.M.unique())
+        rows = []
+        for k in ["cublas"] + [x for x in d.kernel.unique() if x != "cublas"]:
+            cells = ["`cublasGemmEx` (FP16 in, FP32 out)" if k == "cublas" else f"`{k}`"]
+            for s in sizes:
+                r = d[(d.kernel == k) & (d.M == s)]
+                if r.empty:
+                    cells.append("")
+                elif r.status.iloc[0] == "FAILED":
+                    cells.append("FAILED")
+                else:
+                    r = r.iloc[0]
+                    cells.append(f"{r.gflops / 1000:.1f}" + ("" if k == "cublas"
+                                                             else f" ({r.pct_cublas:.0f}%)"))
+            rows.append(cells)
+        prec = ""
+        if self.tc_prec is not None:
+            prec = ("\n\nPrecision cost of FP16 inputs (not a kernel error): normwise relative "
+                    "difference between the FP16-input result and FP32 SGEMM on the same data: "
+                    + "; ".join(f"N = {int(r.N)}: {r.max_rel_err_fp16_inputs_vs_fp32_sgemm:.1e}"
+                                for _, r in self.tc_prec.iterrows()) + ".")
+        return (f"TFLOP/s (and % of `cublasGemmEx`, timed interleaved), from "
+                f"`results/{self.tc_path.name}`. Every kernel is checked against `cublasGemmEx` "
+                f"with the same FP16 inputs (largest observed error {d.max_rel_err.max():.1e})."
+                f"\n\n"
+                + md_table(["kernel"] + [f"N={s}" for s in sizes], rows) + prec)
+
     def t_locked(self):
         if self.locked is None:
             raise Missing("locked*_sgemm_*.csv")
@@ -588,7 +651,7 @@ class Data:
                                                          ).with_suffix(".json"),
                  self.res_path, self.bw_path, *self.ncu_paths.values(),
                  *(p for _, p in self.stride.values()), self.sass_path, self.tune_path,
-                 self.locked_path, RESULTS / "model_bank_conflicts.csv"]
+                 self.locked_path, self.tc_path, RESULTS / "model_bank_conflicts.csv"]
         files = [p for p in files if p is None or p.exists()]
         return "\n".join(f"- `results/{p.name}`" for p in files if p is not None)
 

@@ -6,6 +6,8 @@
 
 #include "../common.h"
 
+#include <cuda_fp16.h>
+
 void launch_v0_naive(int M, int N, int K, const float* A, const float* B, float* C);
 void launch_v1_coalesced(int M, int N, int K, const float* A, const float* B, float* C);
 void launch_v2_smem_tiling(int M, int N, int K, const float* A, const float* B, float* C);
@@ -35,3 +37,9 @@ const std::vector<TuneConfig>& v7_tune_configs();
 void launch_v8_warptiling(int M, int N, int K, const float* A, const float* B, float* C);
 KernelResources resources_v8_warptiling();
 const std::vector<TuneConfig>& v8_tune_configs();
+
+// Tensor-core track (bench --tc): FP16 inputs, FP32 accumulation, WMMA. Sizes: multiples of 128.
+void launch_tc0_wmma_naive(int M, int N, int K, const half* A, const half* B, float* C);
+void launch_tc1_wmma_smem(int M, int N, int K, const half* A, const half* B, float* C);
+KernelResources resources_tc0_wmma_naive();
+KernelResources resources_tc1_wmma_smem();

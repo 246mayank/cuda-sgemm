@@ -25,6 +25,11 @@
 //   --no-write      print results but write no files (used for the Nsight Compute probe)
 //   --tune          run the tuning study (12 tile shapes of v7, 6 warp-tile shapes of v8)
 //                   instead of the v0-v8 series; files get the prefix "tune_" unless --prefix is given
+//   --tc            tensor-core track: FP16 copies of A and B, FP32 accumulation (WMMA kernels
+//                   tc0, tc1), verified and paired against cublasGemmEx with the same FP16
+//                   inputs; sizes that are multiples of 128; prefix "tc_"; default tolerance
+//                   1e-3. Also writes tc_precision_*.csv: how far the FP16-input result is
+//                   from FP32 SGEMM (the precision cost of FP16 inputs, not a kernel error).
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
 //                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
@@ -46,6 +51,12 @@
 #include <string>
 
 namespace {
+
+__global__ void to_half(const float* __restrict__ in, half* __restrict__ out, size_t n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)gridDim.x * blockDim.x)
+        out[i] = __float2half(in[i]);
+}
 
 using Launcher = std::function<void(int, int, int, const float*, const float*, float*)>;
 
@@ -72,7 +83,7 @@ int main(int argc, char** argv) {
     std::string kernel_filter;
     int only_size = 0, warmup = 3, reps = 20;
     double tol = 1e-4;
-    bool write = true, tune = false, prefix_set = false;
+    bool write = true, tune = false, tc = false, prefix_set = false, tol_set = false;
     std::string prefix;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -84,9 +95,10 @@ int main(int argc, char** argv) {
         else if (a == "--size") only_size = std::atoi(next());
         else if (a == "--warmup") warmup = std::atoi(next());
         else if (a == "--reps") reps = std::atoi(next());
-        else if (a == "--tol") tol = std::atof(next());
+        else if (a == "--tol") { tol = std::atof(next()); tol_set = true; }
         else if (a == "--no-write") write = false;
         else if (a == "--tune") tune = true;
+        else if (a == "--tc") tc = true;
         else if (a == "--prefix") { prefix = next(); prefix_set = true; }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
     }
@@ -122,6 +134,31 @@ int main(int argc, char** argv) {
         {"v7_conflict_free", launch_v7_conflict_free, resources_v7_conflict_free, 1 << 30},
         {"v8_warptiling", launch_v8_warptiling, resources_v8_warptiling, 1 << 30},
     };
+    // Tensor-core track: launchers read the FP16 copies (dAh, dBh) made for each size; the
+    // reference is cublasGemmEx on the same FP16 inputs with FP32 output and FP32 compute.
+    half *dAh = nullptr, *dBh = nullptr;
+    Launcher reference = cublas;
+    if (tc) {
+        reference = [&](int M, int N, int K, const float*, const float*, float* C) {
+            CUBLAS_CHECK(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &one, dBh,
+                                      CUDA_R_16F, N, dAh, CUDA_R_16F, K, &zero, C, CUDA_R_32F,
+                                      N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+        };
+        all = {
+            {"tc0_wmma_naive",
+             [&](int M, int N, int K, const float*, const float*, float* C) {
+                 launch_tc0_wmma_naive(M, N, K, dAh, dBh, C);
+             },
+             resources_tc0_wmma_naive, 1 << 30},
+            {"tc1_wmma_smem",
+             [&](int M, int N, int K, const float*, const float*, float* C) {
+                 launch_tc1_wmma_smem(M, N, K, dAh, dBh, C);
+             },
+             resources_tc1_wmma_smem, 1 << 30},
+        };
+        if (!prefix_set) prefix = "tc_";
+        if (!tol_set) tol = 1e-3;
+    }
     if (tune) {
         all.clear();
         for (const auto* list : {&v7_tune_configs(), &v8_tune_configs()})
@@ -133,7 +170,9 @@ int main(int argc, char** argv) {
         if (kernel_filter.empty() || k.name.rfind(kernel_filter, 0) == 0) kernels.push_back(k);
 
     std::vector<int> sizes = {256, 512, 1000, 1023, 1024, 2048, 4096};
+    if (tc) sizes = {256, 512, 1024, 2048, 4096};  // WMMA kernels have no edge handling
     if (only_size) sizes = {only_size};
+    std::vector<std::pair<int, double>> precision;  // tc: FP16-input result vs FP32 SGEMM
 
     // ---------------------------------------------------------------- run
     std::vector<Row> rows;
@@ -156,6 +195,13 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&dC, nC * sizeof(float)));
         CUDA_CHECK(cudaMemcpy(dA, hA.data(), nA * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB, hB.data(), nB * sizeof(float), cudaMemcpyHostToDevice));
+        if (tc) {
+            CUDA_CHECK(cudaMalloc(&dAh, nA * sizeof(half)));
+            CUDA_CHECK(cudaMalloc(&dBh, nB * sizeof(half)));
+            to_half<<<env.prop.multiProcessorCount * 8, 256>>>(dA, dAh, nA);
+            to_half<<<env.prop.multiProcessorCount * 8, 256>>>(dB, dBh, nB);
+            CUDA_CHECK(cudaGetLastError());
+        }
 
         // Runs warm-ups and copies the output to hC. C is filled with 0xFF bytes (NaN)
         // first, so a kernel that skips elements cannot pass on values left behind by a
@@ -173,13 +219,21 @@ int main(int argc, char** argv) {
             return timer.stop_ms();
         };
 
+        // Precision cost of FP16 inputs (tc only): FP32 SGEMM result vs the FP16 reference.
+        std::vector<float> hSgemm;
+        if (tc) {
+            run_and_fetch(cublas);
+            hSgemm = hC;
+        }
+
         // Reference = cuBLAS output from its warm-up run; then its standalone timing.
-        run_and_fetch(cublas);
+        run_and_fetch(reference);
         hRef = hC;
-        std::vector<float> tc(reps);
-        for (int r = 0; r < reps; ++r) tc[r] = time_one(cublas);
+        if (tc) precision.push_back({S, max_rel_err(hRef.data(), hSgemm.data(), nC)});
+        std::vector<float> tref(reps);
+        for (int r = 0; r < reps; ++r) tref[r] = time_one(reference);
         CUDA_CHECK(cudaGetLastError());
-        const TimingStats sc = summarize(tc);
+        const TimingStats sc = summarize(tref);
         rows.push_back({"cublas", M, N, K, sc, flop / (sc.median_ms * 1e6), 100.0, 0.0, "REF",
                         NAN, sample_gpu()});
 
@@ -191,7 +245,7 @@ int main(int argc, char** argv) {
             std::vector<float> tk(reps), tp(reps);
             for (int r = 0; r < reps; ++r) {
                 tk[r] = time_one(k.launch);
-                tp[r] = time_one(cublas);
+                tp[r] = time_one(reference);
             }
             CUDA_CHECK(cudaGetLastError());
             const TimingStats st = summarize(tk), sp = summarize(tp);
@@ -203,6 +257,10 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(dA));
         CUDA_CHECK(cudaFree(dB));
         CUDA_CHECK(cudaFree(dC));
+        if (tc) {
+            CUDA_CHECK(cudaFree(dAh));
+            CUDA_CHECK(cudaFree(dBh));
+        }
     }
 
     const std::string nvsmi_end = nvidia_smi_snapshot();
@@ -249,6 +307,9 @@ int main(int argc, char** argv) {
     write_env_fields(f, env);
     std::fprintf(f, "  \"cublas_version\": %d,\n", cublas_ver);
     std::fprintf(f, "  \"cublas_math_mode\": \"CUBLAS_DEFAULT_MATH\",\n");
+    std::fprintf(f, "  \"reference\": \"%s\",\n",
+                 tc ? "cublasGemmEx: FP16 A and B, FP32 C, CUBLAS_COMPUTE_32F"
+                    : "cublasSgemm: FP32");
     std::fprintf(f, "  \"warmup_runs\": %d,\n", warmup);
     std::fprintf(f, "  \"timed_runs\": %d,\n", reps);
     std::fprintf(f, "  \"tolerance_max_rel_err\": %g,\n", tol);
@@ -276,6 +337,16 @@ int main(int argc, char** argv) {
     }
     std::fclose(f);
 
+    if (tc) {
+        const std::string prec_path =
+            "results/" + prefix + "precision_" + env.gpu_tag + "_" + env.stamp + ".csv";
+        f = std::fopen(prec_path.c_str(), "w");
+        if (!f) { std::fprintf(stderr, "cannot open %s\n", prec_path.c_str()); return 1; }
+        std::fprintf(f, "N,max_rel_err_fp16_inputs_vs_fp32_sgemm\n");
+        for (auto& p : precision) std::fprintf(f, "%d,%.3e\n", p.first, p.second);
+        std::fclose(f);
+        std::printf("wrote %s\n", prec_path.c_str());
+    }
     std::printf("\nwrote %s\nwrote %s\nwrote %s\n", csv_path.c_str(), env_path.c_str(),
                 res_path.c_str());
     return 0;
