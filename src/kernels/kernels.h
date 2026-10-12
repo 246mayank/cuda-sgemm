@@ -69,3 +69,10 @@ struct TcConfig {
     KernelResources (*resources)();
 };
 const std::vector<TcConfig>& tc5_tune_configs();
+
+// Fused epilogue study (bench --epilogue): C = act(A*B + bias[col]) on the v14 GEMM.
+void launch_f1_bias_relu(int M, int N, int K, const float* A, const float* B, const float* bias,
+                         float* C);
+void launch_f1_bias_gelu(int M, int N, int K, const float* A, const float* B, const float* bias,
+                         float* C);
+KernelResources resources_f1_bias_gelu();

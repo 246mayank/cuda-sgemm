@@ -34,6 +34,9 @@
 //                   several tile shapes), run exactly like --tc; prefix "tctune_"
 //   --shapes        rectangular GEMMs of the kind found in transformer layers (M = tokens,
 //                   N/K = hidden or FFN width), for v4, v7, v9 vs cuBLAS; prefix "shapes_"
+//   --epilogue      fused-epilogue study: C = act(A*B + bias) (ReLU, GELU) with the f1 kernel vs
+//                   cublasSgemm followed by a separate bias+activation kernel, timed interleaved;
+//                   writes results/epi_<gpu>_<stamp>.csv
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
 //                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
@@ -64,6 +67,36 @@ __global__ void to_half(const float* __restrict__ in, half* __restrict__ out, si
 
 using Launcher = std::function<void(int, int, int, const float*, const float*, float*)>;
 
+// Unfused epilogue: C = act(C + bias[col]) in a separate pass over C (grid-stride, float4 when
+// N % 4 == 0). act: 1 = ReLU, 2 = GELU tanh approximation (same formula as the fused kernel).
+__device__ __forceinline__ float act_fn(float x, int act) {
+    if (act == 1) return fmaxf(x, 0.f);
+    if (act == 2) return 0.5f * x * (1.f + tanhf(0.79788456f * (x + 0.044715f * x * x * x)));
+    return x;
+}
+
+__global__ void bias_act(float* __restrict__ C, const float* __restrict__ bias, int M, int N,
+                         int act) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    if (N % 4 == 0) {
+        float4* C4 = reinterpret_cast<float4*>(C);
+        const size_t n4 = (size_t)M * N / 4;
+        for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n4; i += stride) {
+            const int c = (int)((i * 4) % N);
+            float4 v = C4[i];
+            v.x = act_fn(v.x + bias[c + 0], act);
+            v.y = act_fn(v.y + bias[c + 1], act);
+            v.z = act_fn(v.z + bias[c + 2], act);
+            v.w = act_fn(v.w + bias[c + 3], act);
+            C4[i] = v;
+        }
+    } else {
+        const size_t n = (size_t)M * N;
+        for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n; i += stride)
+            C[i] = act_fn(C[i] + bias[i % N], act);
+    }
+}
+
 struct Kernel {
     std::string name;
     Launcher launch;
@@ -81,6 +114,114 @@ struct Row {
     GpuSample after;          // SM clock / power sampled right after the timed runs
 };
 
+// --epilogue: fused vs unfused act(A*B + bias). Returns the process exit code.
+int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int reps, double tol,
+                 const std::string& prefix, bool write) {
+    struct Shape {
+        int M, N, K;
+    };
+    const std::vector<Shape> shapes = {{1024, 1024, 1024}, {2048, 2048, 2048}, {4096, 4096, 4096},
+                                       {2048, 3072, 768},  {2048, 768, 3072}};
+    const float one = 1.f, zero = 0.f;
+    std::mt19937 rng(42), brng(7);
+    std::uniform_real_distribution<float> dist(-1.f, 1.f);
+    GpuTimer timer;
+    const int grid = env.prop.multiProcessorCount * 8;
+
+    struct EpiRow {
+        const char* act;
+        Shape s;
+        TimingStats u, f;
+        double err;
+        const char* status;
+    };
+    std::vector<EpiRow> rows;
+    for (const Shape& sh : shapes) {
+        const int M = sh.M, N = sh.N, K = sh.K;
+        const size_t nA = (size_t)M * K, nB = (size_t)K * N, nC = (size_t)M * N;
+        std::vector<float> hA(nA), hB(nB), hbias(N), hu(nC), hf(nC);
+        for (auto& x : hA) x = dist(rng);
+        for (auto& x : hB) x = dist(rng);
+        for (auto& x : hbias) x = dist(brng);
+        float *dA, *dB, *dbias, *dCu, *dCf;
+        CUDA_CHECK(cudaMalloc(&dA, nA * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&dB, nB * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&dbias, N * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&dCu, nC * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&dCf, nC * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(dA, hA.data(), nA * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dB, hB.data(), nB * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dbias, hbias.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+
+        for (int act = 1; act <= 2; ++act) {
+            auto unfused = [&]() {  // cuBLAS SGEMM, then a separate bias + activation pass
+                CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &one, dB, N,
+                                         dA, K, &zero, dCu, N));
+                bias_act<<<grid, 256>>>(dCu, dbias, M, N, act);
+            };
+            auto fused = [&]() {
+                if (act == 1) launch_f1_bias_relu(M, N, K, dA, dB, dbias, dCf);
+                else launch_f1_bias_gelu(M, N, K, dA, dB, dbias, dCf);
+            };
+            CUDA_CHECK(cudaMemset(dCf, 0xFF, nC * sizeof(float)));  // NaN: skipped writes fail
+            for (int i = 0; i < std::max(warmup, 1); ++i) { unfused(); fused(); }
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaMemcpy(hu.data(), dCu, nC * sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hf.data(), dCf, nC * sizeof(float), cudaMemcpyDeviceToHost));
+            const double err = max_rel_err(hf.data(), hu.data(), nC);
+            std::vector<float> tu(reps), tf(reps);
+            for (int r = 0; r < reps; ++r) {  // interleaved, like the paired cuBLAS timing
+                timer.start();
+                unfused();
+                tu[r] = timer.stop_ms();
+                timer.start();
+                fused();
+                tf[r] = timer.stop_ms();
+            }
+            CUDA_CHECK(cudaGetLastError());
+            rows.push_back({act == 1 ? "relu" : "gelu", sh, summarize(tu), summarize(tf), err,
+                            err <= tol ? "PASS" : "FAILED"});
+        }
+        CUDA_CHECK(cudaFree(dA));
+        CUDA_CHECK(cudaFree(dB));
+        CUDA_CHECK(cudaFree(dbias));
+        CUDA_CHECK(cudaFree(dCu));
+        CUDA_CHECK(cudaFree(dCf));
+    }
+
+    std::printf("\n%-5s %5s %5s %5s %12s %12s %8s %10s %s\n", "act", "M", "N", "K",
+                "unfused_ms", "fused_ms", "speedup", "rel_err", "status");
+    for (auto& r : rows)
+        std::printf("%-5s %5d %5d %5d %12.4f %12.4f %8.3f %10.2e %s\n", r.act, r.s.M, r.s.N, r.s.K,
+                    r.u.median_ms, r.f.median_ms, r.u.median_ms / r.f.median_ms, r.err, r.status);
+    if (!write) return 0;
+
+    const std::string path = "results/" + prefix + "epi_" + env.gpu_tag + "_" + env.stamp + ".csv";
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", path.c_str()); return 1; }
+    std::fprintf(f, "act,M,N,K,unfused_median_ms,unfused_min_ms,unfused_p90_ms,fused_median_ms,"
+                    "fused_min_ms,fused_p90_ms,speedup,max_rel_err,status\n");
+    for (auto& r : rows)
+        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.3e,%s\n", r.act, r.s.M,
+                     r.s.N, r.s.K, r.u.median_ms, r.u.min_ms, r.u.p90_ms, r.f.median_ms, r.f.min_ms,
+                     r.f.p90_ms, r.u.median_ms / r.f.median_ms, r.err, r.status);
+    std::fclose(f);
+    const std::string env_path =
+        "results/" + prefix + "epi_env_" + env.gpu_tag + "_" + env.stamp + ".json";
+    f = std::fopen(env_path.c_str(), "w");
+    if (f) {
+        std::fprintf(f, "{\n");
+        write_env_fields(f, env);
+        std::fprintf(f, "  \"warmup_runs\": %d,\n  \"timed_runs\": %d,\n", warmup, reps);
+        std::fprintf(f, "  \"tolerance_max_rel_err\": %g,\n", tol);
+        std::fprintf(f, "  \"unfused\": \"cublasSgemm + bias_act kernel\"\n}\n");
+        std::fclose(f);
+    }
+    std::printf("wrote %s\n", path.c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -88,6 +229,7 @@ int main(int argc, char** argv) {
     int only_size = 0, warmup = 3, reps = 20;
     double tol = 1e-4;
     bool write = true, tune = false, tc = false, tc_tune = false, shapes_mode = false,
+         epilogue_mode = false,
          prefix_set = false, tol_set = false;
     std::string prefix;
     for (int i = 1; i < argc; ++i) {
@@ -106,6 +248,7 @@ int main(int argc, char** argv) {
         else if (a == "--tc") tc = true;
         else if (a == "--tc-tune") tc = tc_tune = true;  // same FP16 path as --tc
         else if (a == "--shapes") shapes_mode = true;
+        else if (a == "--epilogue") epilogue_mode = true;
         else if (a == "--prefix") { prefix = next(); prefix_set = true; }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
     }
@@ -122,6 +265,11 @@ int main(int argc, char** argv) {
     CUBLAS_CHECK(cublasGetVersion(handle, &cublas_ver));
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
     std::printf("cuBLAS %d\n", cublas_ver);
+    if (epilogue_mode) {
+        const int rc = run_epilogue(env, handle, warmup, reps, tol, prefix, write);
+        CUBLAS_CHECK(cublasDestroy(handle));
+        return rc;
+    }
 
     // ---------------------------------------------------------------- kernels
     const float one = 1.f, zero = 0.f;
