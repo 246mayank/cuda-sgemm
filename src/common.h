@@ -99,6 +99,28 @@ inline double max_rel_err(const float* C, const float* R, size_t n) {
     return max_ref > 0.0 ? max_diff / max_ref : max_diff;
 }
 
+// ------------------------------------------------------------------ kernel resources
+
+// What the compiler gave a kernel and how many of its blocks fit on one SM. Read at run
+// time from the compiled binary, so the README's register/occupancy numbers are measured
+// facts about this build, not estimates.
+struct KernelResources {
+    int regs_per_thread;
+    int local_bytes_per_thread;  // > 0 means register spills (or local arrays) in local memory
+    int static_smem_bytes;
+    int threads_per_block;
+    int blocks_per_sm;           // limited by threads, registers or shared memory
+};
+
+template <typename KernelFn>
+KernelResources kernel_resources(KernelFn* fn, int threads_per_block) {
+    cudaFuncAttributes a;
+    CUDA_CHECK(cudaFuncGetAttributes(&a, fn));
+    int blocks = 0;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, fn, threads_per_block, 0));
+    return {a.numRegs, (int)a.localSizeBytes, (int)a.sharedSizeBytes, threads_per_block, blocks};
+}
+
 // ------------------------------------------------------------------ environment record
 
 // Runs a shell command and returns its stdout (trailing newlines stripped).

@@ -3,6 +3,11 @@
   figures/gflops_vs_size.png   GFLOP/s vs square size (powers of two), one line per kernel,
                                cuBLAS as a dashed reference
   figures/pct_cublas.png       % of cuBLAS at the largest size, one bar per kernel
+  figures/roofline.png         roofline at N = 2048: measured DRAM roof (bandwidth.cu),
+                               theoretical FP32 roof, cuBLAS as the practical ceiling, each
+                               kernel placed at its MEASURED arithmetic intensity (Nsight
+                               Compute DRAM bytes) and its benchmark GFLOP/s. Skipped, with a
+                               message, if the ncu or bandwidth results are missing.
 
 A kernel that FAILED the cuBLAS check at any size is left out of every figure, and the
 failing sizes are listed in the figure note.
@@ -13,7 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from results_io import FIGURES, KERNEL_ORDER, kernels_in, load_run, parse_args
+from results_io import (FIGURES, KERNEL_ORDER, kernels_in, load_bandwidth, load_ncu, load_run,
+                        parse_args, peak_fp32_gflops)
 
 # Reference categorical palette (light mode), fixed slot per kernel in KERNEL_ORDER.
 SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
@@ -111,12 +117,92 @@ def pct_cublas(df, env, csv_path):
     return out
 
 
+ROOFLINE_N = 2048  # size profiled by the ncu cells in the notebook
+
+
+def roofline(df, env, csv_path):
+    ncu, ncu_path = load_ncu("dram")
+    bw, bw_path = load_bandwidth()
+    peak = peak_fp32_gflops(env)
+    if ncu is None or bw is None or peak is None:
+        missing = [n for n, v in (("ncu_dram_*.csv", ncu), ("bandwidth_*.csv", bw),
+                                  ("FP32 lanes for this GPU", peak)) if v is None]
+        print("roofline skipped, missing:", ", ".join(missing))
+        return None
+
+    n = ROOFLINE_N
+    flop = 2.0 * n ** 3
+    ok = passing(df)
+    at_n = ok[ok.M == n]
+    mem_roof = bw.gbps_median.max()                  # best measured method, median of its runs
+    theo_bw = bw.theoretical_gbps.iloc[0]
+    paired = at_n.cublas_paired_median_ms.dropna() if "cublas_paired_median_ms" in at_n else []
+    cublas = (flop / (paired.median() * 1e6) if len(paired)
+              else at_n[at_n.kernel == "cublas"].gflops.iloc[0])
+    ideal_ai = flop / (3 * n * n * 4)                # A, B read once and C written once
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    x = [0.05, 2000]
+    import numpy as np
+    xs = np.logspace(np.log10(x[0]), np.log10(x[1]), 200)
+    ax.plot(xs, np.minimum(xs * mem_roof, peak), color=INK, lw=2)
+    ax.plot(xs, np.minimum(xs * theo_bw, peak), color=INK2, lw=1, ls=":")
+    ax.axhline(cublas, color=REF, lw=1.5, ls="--")
+    ax.axvline(ideal_ai, color=GRID, lw=1.5)
+    ax.text(x[1], peak * 1.08, f"FP32 peak {peak:,.0f} GFLOP/s (theoretical)  ", ha="right",
+            va="bottom", color=INK2, fontsize=8)
+    ax.text(x[1], cublas * 0.92, f"cuBLAS {cublas:,.0f} GFLOP/s at N = {n} (practical)  ",
+            ha="right", va="top", color=INK2, fontsize=8)
+    ax.text(0.3, 0.3 * mem_roof * 0.55, f"measured DRAM roof\n{mem_roof:.0f} GB/s", ha="left",
+            va="top", color=INK, fontsize=8)
+    ax.text(0.07, 0.07 * theo_bw * 2.4, f"spec {theo_bw:.0f} GB/s (dotted)", ha="left",
+            va="bottom", color=INK2, fontsize=8)
+    ax.text(ideal_ai * 0.93, 14, "minimum DRAM traffic\n(each matrix moved once)", ha="right",
+            va="bottom", color=INK2, fontsize=8)
+
+    placed = []
+    for k in kernels_in(at_n):
+        if k not in ncu.index:
+            continue
+        r = ncu.loc[k]
+        moved = r.get("dram__bytes_read.sum", np.nan) + r.get("dram__bytes_write.sum", np.nan)
+        if not moved > 0:
+            continue
+        ai = flop / moved
+        g = float(at_n[at_n.kernel == k].gflops.iloc[0])
+        ax.scatter([ai], [g], s=60, color=COLOR.get(k, INK2), edgecolor=SURFACE, lw=2, zorder=3,
+                   label=k)
+        ax.annotate(k, (ai, g), xytext=(7, -3), textcoords="offset points", color=INK2,
+                    fontsize=8)
+        placed.append(k)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(*x)
+    ax.set_ylim(10, peak * 3)
+    ax.set_xlabel("arithmetic intensity (FLOP per DRAM byte, measured with Nsight Compute)")
+    ax.set_ylabel("GFLOP/s (log scale)")
+    ax.set_title(f"Roofline, N = {n}", loc="left", fontsize=13, color=INK, pad=30)
+    ax.text(0, 1.01, f"{subtitle(env, csv_path)}\nDRAM bytes: {ncu_path.name}; "
+            f"bandwidth: {bw_path.name}", transform=ax.transAxes, fontsize=7, color=INK2)
+    if placed:
+        ax.legend(loc="upper left", fontsize=8)
+    failure_note(fig, df)
+    fig.tight_layout()
+    out = FIGURES / "roofline.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
 def main():
     args = parse_args(__doc__)
     df, env, csv_path = load_run(args.csv)
     FIGURES.mkdir(exist_ok=True)
-    for out in (gflops_vs_size(df, env, csv_path), pct_cublas(df, env, csv_path)):
-        print("wrote", out.relative_to(FIGURES.parent))
+    for out in (gflops_vs_size(df, env, csv_path), pct_cublas(df, env, csv_path),
+                roofline(df, env, csv_path)):
+        if out:
+            print("wrote", out.relative_to(FIGURES.parent))
 
 
 if __name__ == "__main__":

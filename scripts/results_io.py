@@ -57,6 +57,51 @@ def peak_fp32_gflops(env):
     return env["sm_count"] * lanes[cc] * env["sm_clock_max_khz"] * 1e3 * 2 / 1e9
 
 
+def newest(pattern):
+    """Newest results file matching pattern (file names end in a sortable UTC stamp)."""
+    files = sorted(RESULTS.glob(pattern))
+    return files[-1] if files else None
+
+
+def load_resources(csv_path):
+    """results/kernels_<gpu>_<stamp>.csv written by the same bench run, or None."""
+    p = Path(csv_path).with_name(Path(csv_path).name.replace("sgemm_", "kernels_", 1))
+    return (pd.read_csv(p), p) if p.exists() else (None, None)
+
+
+def load_bandwidth():
+    p = newest("bandwidth_*.csv")
+    return (pd.read_csv(p), p) if p else (None, None)
+
+
+def parse_ncu(path):
+    """Nsight Compute --csv log -> DataFrame indexed by kernel, one column per metric.
+
+    Each kernel is launched more than once under ncu (warm-up + timed rep); the last launch
+    is used. Kernel names are reduced to the bench name (sgemm_v2_smem_tiling -> v2_smem_tiling).
+    Returns None if the file has no metric rows (e.g. ncu was blocked or a metric was invalid).
+    """
+    import io
+    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith('"ID"')), None)
+    if start is None:
+        return None
+    df = pd.read_csv(io.StringIO("\n".join(lines[start:])))
+    df["kernel"] = df["Kernel Name"].str.extract(r"sgemm_(v\d+_[A-Za-z0-9_]+)")[0]
+    df["value"] = pd.to_numeric(df["Metric Value"].astype(str).str.replace(",", ""),
+                                errors="coerce")
+    df = df.dropna(subset=["kernel"]).sort_values("ID")
+    return df.groupby(["kernel", "Metric Name"])["value"].last().unstack()
+
+
+def load_ncu(kind):
+    """Newest results/ncu_<kind>_*.csv parsed, plus its path; (None, None) if absent."""
+    p = newest(f"ncu_{kind}_*.csv")
+    if p is None:
+        return None, None
+    return parse_ncu(p), p
+
+
 def nvsmi_row(snapshot):
     """Parses the nvidia-smi CSV snapshot (header line + one data line) into a dict."""
     lines = [l for l in snapshot.splitlines() if l.strip()]

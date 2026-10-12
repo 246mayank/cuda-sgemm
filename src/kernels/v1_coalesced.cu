@@ -48,3 +48,5 @@ void launch_v1_coalesced(int M, int N, int K, const float* A, const float* B, fl
     dim3 grid(ceil_div(N, BLOCK), ceil_div(M, BLOCK));
     sgemm_v1_coalesced<<<grid, block>>>(M, N, K, A, B, C);
 }
+
+KernelResources resources_v1_coalesced() { return kernel_resources(sgemm_v1_coalesced, BLOCK * BLOCK); }

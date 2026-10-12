@@ -47,3 +47,5 @@ void launch_v0_naive(int M, int N, int K, const float* A, const float* B, float*
     dim3 grid(ceil_div(M, BLOCK), ceil_div(N, BLOCK));
     sgemm_v0_naive<<<grid, block>>>(M, N, K, A, B, C);
 }
+
+KernelResources resources_v0_naive() { return kernel_resources(sgemm_v0_naive, BLOCK * BLOCK); }

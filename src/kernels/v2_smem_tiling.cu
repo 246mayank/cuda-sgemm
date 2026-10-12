@@ -64,3 +64,5 @@ void launch_v2_smem_tiling(int M, int N, int K, const float* A, const float* B, 
     dim3 grid(ceil_div(N, TILE), ceil_div(M, TILE));
     sgemm_v2_smem_tiling<<<grid, block>>>(M, N, K, A, B, C);
 }
+
+KernelResources resources_v2_smem_tiling() { return kernel_resources(sgemm_v2_smem_tiling, TILE * TILE); }

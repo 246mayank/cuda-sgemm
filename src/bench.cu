@@ -48,6 +48,7 @@ using Launcher = std::function<void(int, int, int, const float*, const float*, f
 struct Kernel {
     std::string name;
     Launcher launch;
+    KernelResources (*resources)();
     int max_size;  // sizes above this are skipped (no CSV row)
 };
 
@@ -103,9 +104,12 @@ int main(int argc, char** argv) {
                                  &zero, C, N));
     };
     std::vector<Kernel> all = {
-        {"v0_naive", launch_v0_naive, 2048},
-        {"v1_coalesced", launch_v1_coalesced, 1 << 30},
-        {"v2_smem_tiling", launch_v2_smem_tiling, 1 << 30},
+        {"v0_naive", launch_v0_naive, resources_v0_naive, 2048},
+        {"v1_coalesced", launch_v1_coalesced, resources_v1_coalesced, 1 << 30},
+        {"v2_smem_tiling", launch_v2_smem_tiling, resources_v2_smem_tiling, 1 << 30},
+        {"v3_1d_blocktiling", launch_v3_1d_blocktiling, resources_v3_1d_blocktiling, 1 << 30},
+        {"v4_2d_blocktiling", launch_v4_2d_blocktiling, resources_v4_2d_blocktiling, 1 << 30},
+        {"v5_vectorized", launch_v5_vectorized, resources_v5_vectorized, 1 << 30},
     };
     std::vector<Kernel> kernels;
     for (auto& k : all)
@@ -232,6 +236,24 @@ int main(int argc, char** argv) {
     std::fprintf(f, "}\n");
     std::fclose(f);
 
-    std::printf("\nwrote %s\nwrote %s\n", csv_path.c_str(), env_path.c_str());
+    // Per-kernel resources of this build: registers, spills, shared memory, occupancy.
+    const std::string res_path = "results/kernels_" + env.gpu_tag + "_" + env.stamp + ".csv";
+    f = std::fopen(res_path.c_str(), "w");
+    if (!f) { std::fprintf(stderr, "cannot open %s\n", res_path.c_str()); return 1; }
+    const int max_warps = env.prop.maxThreadsPerMultiProcessor / 32;
+    std::fprintf(f, "kernel,regs_per_thread,local_bytes_per_thread,static_smem_bytes,"
+                    "threads_per_block,blocks_per_sm,warps_per_sm,max_warps_per_sm,"
+                    "theoretical_occupancy_pct\n");
+    for (auto& k : kernels) {
+        const KernelResources r = k.resources();
+        const int warps = r.blocks_per_sm * r.threads_per_block / 32;
+        std::fprintf(f, "%s,%d,%d,%d,%d,%d,%d,%d,%.1f\n", k.name.c_str(), r.regs_per_thread,
+                     r.local_bytes_per_thread, r.static_smem_bytes, r.threads_per_block,
+                     r.blocks_per_sm, warps, max_warps, 100.0 * warps / max_warps);
+    }
+    std::fclose(f);
+
+    std::printf("\nwrote %s\nwrote %s\nwrote %s\n", csv_path.c_str(), env_path.c_str(),
+                res_path.c_str());
     return 0;
 }
