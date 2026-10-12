@@ -1,0 +1,7 @@
+==PROF== Connected to process 26004 (/content/cuda-sgemm/bench)
+==PROF== Disconnected from process 26004
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","26004","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_set_accesses_pipe_lsu_mem_global_op_ld.sum","","1,107,296,256"
+"0","26004","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld.sum","cycle","234,881,237"
+"1","26004","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_set_accesses_pipe_lsu_mem_global_op_ld.sum","","1,107,296,256"
+"1","26004","bench","127.0.0.1","<unnamed>::sgemm_v0_naive(int, int, int, const float *, const float *, float *)","1","7","(32, 32, 1)","(32, 32, 1)","0","7.5","Command line profiler metrics","l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld.sum","cycle","234,881,210"
