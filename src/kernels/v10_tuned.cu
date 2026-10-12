@@ -229,6 +229,14 @@ const std::vector<TuneConfig>& v10_tune_configs() {
         V10_CFG(128, 32, 8, 8, 4, 4, 0),
         // shallower K tile: half the shared memory per block, twice the barriers
         V10_CFG(64, 128, 4, 8, 8, 4, 8),
+        // round 2, around the round-1 winner (64x128, MINB 4)
+        V10_CFG(64, 128, 8, 8, 8, 5, 0),   // 102-register cap: where do spills start to hurt?
+        V10_CFG(64, 128, 8, 8, 8, 4, 4),
+        V10_CFG(64, 128, 8, 8, 8, 4, 16),
+        V10_CFG(96, 128, 8, 8, 8, 3, 0),   // 192 threads
+        V10_CFG(64, 192, 8, 8, 8, 3, 0),   // 192 threads, wider B panel
+        V10_CFG(64, 256, 8, 8, 8, 2, 0),   // 256 threads
+        V10_CFG(128, 64, 8, 8, 8, 4, 8),
     };
     return configs;
 }
