@@ -51,3 +51,5 @@ void launch_tc2_wmma_db(int M, int N, int K, const half* A, const half* B, float
 KernelResources resources_tc2_wmma_db();
 void launch_tc3_ptx_mma(int M, int N, int K, const half* A, const half* B, float* C);
 KernelResources resources_tc3_ptx_mma();
+void launch_tc4_ptx_bk32(int M, int N, int K, const half* A, const half* B, float* C);
+KernelResources resources_tc4_ptx_bk32();

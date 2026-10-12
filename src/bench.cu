@@ -166,6 +166,11 @@ int main(int argc, char** argv) {
                  launch_tc3_ptx_mma(M, N, K, dAh, dBh, C);
              },
              resources_tc3_ptx_mma, 1 << 30},
+            {"tc4_ptx_bk32",
+             [&](int M, int N, int K, const float*, const float*, float* C) {
+                 launch_tc4_ptx_bk32(M, N, K, dAh, dBh, C);
+             },
+             resources_tc4_ptx_bk32, 1 << 30},
         };
         if (!prefix_set) prefix = "tc_";
         if (!tol_set) tol = 1e-3;
