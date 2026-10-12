@@ -318,6 +318,13 @@ class Data:
             if name == "red_pct_bw":
                 return f"{100 * r.gbps / self.bw_best()[0]:.0f}%"
             return f"{r.gbps / self.reduce_row(args[1]).gbps:.1f}x"  # {{red_speedup:K1:K2}}
+        if name in ("tctune_best", "tctune_best_pct"):  # {{tctune_best:N}} best tc5 config at N
+            d = self.tctune()
+            g = d[(d.kernel != "cublas") & (d.M == int(args[0])) & (d.status == "PASS")]
+            if g.empty:
+                raise Missing(f"tctune at N={args[0]}")
+            b = g.loc[g.pct_cublas.idxmax()]
+            return f"`{b.kernel}`" if name == "tctune_best" else f"{b.pct_cublas:.1f}%"
         if name == "tc_tflops":  # {{tc_tflops:K:N}} (K may be cublas = cublasGemmEx)
             return f"{self.tc_row(args[0], args[1]).gflops / 1000:.1f}"
         if name == "tc_pct":
@@ -731,6 +738,31 @@ class Data:
         return (f"M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of "
                 f"paired cuBLAS, from `results/{p.name}`:\n\n"
                 + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11", "v12"], rows))
+
+    def tctune(self):
+        p = newest("tctune_sgemm_*.csv")
+        if p is None:
+            raise Missing("tctune_sgemm_*.csv")
+        self.tctune_path = p
+        return pd.read_csv(p)
+
+    def t_tctune(self):
+        d = self.tctune()
+        sizes = sorted(d.M.unique())
+        failed = sorted(set(d[d.status == "FAILED"].kernel))
+        rows = []
+        for k, g in d[(d.kernel != "cublas") & ~d.kernel.isin(failed)].groupby("kernel", sort=False):
+            cells = [f"`{k}`"]
+            for s in sizes:
+                r = g[g.M == s]
+                cells.append(f"{r.pct_cublas.iloc[0]:.0f}%" if not r.empty else "")
+            rows.append(cells)
+        note = ("" if not failed else
+                "\n\nFailed the check (excluded): " + ", ".join(f"`{k}`" for k in failed))
+        return ("% of `cublasGemmEx` (same FP16 inputs, timed interleaved) for each tensor-core tile "
+                "configuration (tc5_<BM>x<BN>x<BK>_w<WARPS_M>x<WARPS_N>_b<MINB>), from "
+                f"`results/{self.tctune_path.name}`:\n\n"
+                + md_table(["config"] + [f"N={s}" for s in sizes], rows) + note)
 
     def t_locked(self):
         if self.locked is None:
