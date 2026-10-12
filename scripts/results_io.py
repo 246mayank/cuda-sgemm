@@ -18,7 +18,7 @@ FIGURES = ROOT / "figures"
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
                 "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free",
-                "v8_warptiling", "v9_autotuned"]
+                "v8_warptiling", "v9_autotuned", "v11_splitk"]
 
 
 def parse_args(description):
@@ -102,6 +102,8 @@ def bench_name(kernel_symbol):
     if m:
         d = tuple(int(g) for g in m.groups() if g is not None)
         return "v10_{}x{}x{}_{}x{}_b{}_s{}".format(*d)
+    if re.search(r"sgemm_v11(?:<|I)", s):  # v11 split-K template
+        return "v11_splitk"
     for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel
         if name in s:
             return name
@@ -150,7 +152,9 @@ def parse_sass(path):
                           ("STS.128", op.startswith("STS") and ".128" in op),
                           ("STG", op.startswith("STG")),
                           ("STG.128", op.startswith("STG") and ".128" in op),
-                          ("BAR", op.startswith("BAR"))):
+                          ("BAR", op.startswith("BAR")),
+                          ("HMMA", op.startswith("HMMA")),
+                          ("LDSM", op.startswith("LDSM"))):
             if test:
                 c[key] = c.get(key, 0) + 1
     df = pd.DataFrame.from_dict(rows, orient="index").fillna(0).astype(int)

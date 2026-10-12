@@ -41,6 +41,8 @@ const std::vector<TuneConfig>& v10_tune_configs();  // tuning study only
 
 void launch_v9_autotuned(int M, int N, int K, const float* A, const float* B, float* C);
 KernelResources resources_v9_autotuned();
+void launch_v11_splitk(int M, int N, int K, const float* A, const float* B, float* C);
+KernelResources resources_v11_splitk();
 
 // Tensor-core track (bench --tc): FP16 inputs, FP32 accumulation, WMMA. Sizes: multiples of 128.
 void launch_tc0_wmma_naive(int M, int N, int K, const half* A, const half* B, float* C);

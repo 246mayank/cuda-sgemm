@@ -284,6 +284,16 @@ class Data:
             if r.empty:
                 raise Missing(f"tc resources for {args[0]}")
             return str(r.iloc[0][args[1]])
+        if name == "shape_pct":  # {{shape_pct:K:M:N:Kdim}} % of paired cuBLAS on a shape
+            p = newest("shapes_sgemm_*.csv")
+            if p is None:
+                raise Missing("shapes_sgemm_*.csv")
+            d = pd.read_csv(p)
+            r = d[(d.kernel == args[0]) & (d.M == int(args[1])) & (d.N == int(args[2]))
+                  & (d.K == int(args[3]))]
+            if r.empty or r.status.iloc[0] == "FAILED":
+                raise Missing(f"shape {args}")
+            return f"{r.pct_cublas.iloc[0]:.1f}%"
         if name in ("red_gbps", "red_pct_cub", "red_pct_bw", "red_speedup"):
             r = self.reduce_row(args[0])
             if name == "red_gbps":
@@ -649,19 +659,20 @@ class Data:
         if p is None:
             raise Missing("reduce_*.csv")
         d = pd.read_csv(p)
-        bw = self.bw_best()[0] if self.bw is not None else None
+        bw, spec = self.bw_best()
         rows = []
         for _, r in d.iterrows():
             rows.append([f"`{r.kernel}`" if r.kernel != "cub" else "CUB `DeviceReduce::Sum`",
-                         f"{r.median_ms:.3f}", f"{r.gbps:.0f}",
-                         f"{100 * r.gbps / bw:.0f}%" if bw else "n/a",
+                         f"{r.median_ms:.3f}", f"{r.gbps:.0f}", f"{100 * r.gbps / spec:.0f}%",
                          "100% (ref)" if r.kernel == "cub" else f"{r.pct_of_cub:.0f}%",
                          f"{r.rel_err:.1e}", r.status])
         return (f"Sum of {int(d.n.iloc[0]):,} floats ({int(d.n.iloc[0]) * 4 // 2**20} MiB), from "
-                f"`results/{p.name}`. Bandwidth = input bytes / median time; the memory roof is the "
-                f"measured copy bandwidth ({bw:.0f} GB/s):\n\n" if bw else "\n\n") + md_table(
-            ["kernel", "median ms", "GB/s", "% of measured DRAM bandwidth", "% of CUB",
-             "relative error", "check"], rows)
+                f"`results/{p.name}`. Bandwidth = input bytes / median time, compared with the "
+                f"{spec:.0f} GB/s DRAM spec. (The measured copy bandwidth, {bw:.0f} GB/s, isn't the "
+                f"right roof here: a copy reads and writes, while a reduction only reads, and a "
+                f"read-only stream gets closer to the spec.)\n\n") + md_table(
+            ["kernel", "median ms", "GB/s", "% of DRAM spec", "% of CUB", "relative error",
+             "check"], rows)
 
     def reduce_row(self, k):
         p = newest("reduce_Tesla*.csv") or newest("reduce_*.csv")
@@ -684,10 +695,11 @@ class Data:
                                   else f"{r.pct_cublas.iloc[0]:.0f}%"))(g[g.kernel == name])
             cub = g[g.kernel == "cublas"]
             rows.append([f"{m} × {n} × {k}", f"{cub.gflops.iloc[0]:,.0f}" if not cub.empty else "",
-                         cell("v4_2d_blocktiling"), cell("v7_conflict_free"), cell("v9_autotuned")])
+                         cell("v4_2d_blocktiling"), cell("v7_conflict_free"), cell("v9_autotuned"),
+                         cell("v11_splitk")])
         return (f"M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of "
                 f"paired cuBLAS, from `results/{p.name}`:\n\n"
-                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9"], rows))
+                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11"], rows))
 
     def t_locked(self):
         if self.locked is None:

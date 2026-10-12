@@ -443,7 +443,13 @@ prefetched tile is held in registers.
 `tc4`: {{tc_pct:tc4_ptx_bk32:2048}} of `cublasGemmEx` at N = 2048 (tc1:
 {{tc_pct:tc1_wmma_smem:2048}}), {{tc_tflops:tc4_ptx_bk32:2048}} TFLOP/s, spills
 {{tc_res:tc4_ptx_bk32:local_bytes_per_thread}} bytes per thread.
-<!-- FINALIZE AFTER NIGHT RUN: tc4 vs tc1 interpretation (PTX at equal schedule). -->
+**Hand-written PTX did not beat WMMA, and the machine code shows why.** The compiler already
+lowers tc1's WMMA calls to the same instructions: its SASS contains
+{{sass:tc1_wmma_smem:LDSM}} `LDSM` (the machine form of `ldmatrix`) and
+{{sass:tc1_wmma_smem:HMMA}} `HMMA` (tensor-core MMA) instructions. Writing them by hand bought
+control but no new capability on Turing, and tc4 also spills at the 128-register cap. The
+tensor-core track therefore stops at tc1 as its best kernel. The lesson generalises: read the
+SASS before assuming hand-written assembly will win.
 The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tensor cores:
 - **`tc0`** moves {{tcdram_mb:tc0_wmma_naive}} MB through DRAM, and its tensor pipe is busy only
   {{tcpipe:tc0_wmma_naive}} of the time: the tensor cores mostly wait for data.
@@ -462,7 +468,24 @@ N and K are model or feed-forward widths. `./bench --shapes` runs v4, v7 and v9 
 v9's dispatch table was tuned on squares only, so this tests how well the tuning generalises.
 
 {{table:shapes}}
-<!-- FINALIZE AFTER NIGHT RUN: what generalises and what doesn't (skinny M = 128, small K = 128). -->
+What generalises:
+- **Wide shapes.** v9, tuned only on squares, holds most of its square-size advantage on wide
+  transformer shapes (e.g. {{shape_pct:v9_autotuned:2048:3072:768}} on 2048 × 3072 × 768).
+- **Small K.** With K = 128 it beats cuBLAS ({{shape_pct:v9_autotuned:4096:4096:128}}).
+
+What doesn't:
+- **Skinny M.** At M = 128, v9 drops to {{shape_pct:v9_autotuned:128:4096:4096}}. A 64-row tile
+  gives just 2 block-rows × 32 block-columns = 64 blocks for 40 SMs × 4 slots, so most of the
+  GPU idles.
+
+**v11: split-K** ([`v11_splitk.cu`](src/kernels/v11_splitk.cu)) fixes exactly that case.
+- Blocks along a third grid dimension each sum one slice of K, and the slices are combined with
+  `atomicAdd`.
+- The launcher picks enough slices for about two waves of blocks, and 1 slice (exactly v10)
+  when the grid already fills the GPU.
+- Skinny M = 128: {{shape_pct:v11_splitk:128:4096:4096}} of cuBLAS (v9:
+  {{shape_pct:v9_autotuned:128:4096:4096}}).
+<!-- FINALIZE AFTER FINAL RUN: confirm the v11 sentence direction. -->
 
 ### What still separates the best kernel from cuBLAS
 
@@ -493,7 +516,15 @@ therefore the measured DRAM bandwidth and CUB's `DeviceReduce::Sum`, not FLOPs. 
 checked against a double-precision host sum.
 
 {{table:reduce}}
-<!-- FINALIZE AFTER NIGHT RUN: interpretation (which step closed most of the gap; how r5 compares with CUB and the roof). -->
+- **The big steps:** `r3` (adding during the load, {{red_speedup:r3_first_add:r2_sequential}} vs
+  r2) and `r4` (finishing with warp shuffles, {{red_speedup:r4_warp_shuffle:r3_first_add}} vs
+  r3). Both cut the work done per byte loaded, not the bytes themselves.
+- **`r5` reaches {{red_gbps:r5_grid_stride}} GB/s, {{red_pct_cub:r5_grid_stride}} of CUB.** That's
+  above the copy kernel's figure, because a copy has to read *and* write while a reduction only
+  reads.
+- **Divergence vs bank conflicts:** `r1` is *slower* than `r0` here
+  ({{red_speedup:r1_strided_index:r0_interleaved}}): its strided shared-memory indices cost
+  more than the warp divergence they remove.
 
 ## Methodology
 
