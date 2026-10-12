@@ -269,12 +269,32 @@ class Data:
         if name == "achieved_occ":
             return f"{self.ncu_val('mem', 'sm__warps_active.avg.pct_of_peak_sustained_active', args[0]):.0f}%"
         if name == "stride":
-            t, _ = self.stride[int(args[1])]
-            if t is None or "v0_naive" not in t.index or args[0] not in t.columns:
+            v = None
+            for key in (int(args[1]), f"set{args[1]}"):
+                t, _ = self.stride[key]
+                if t is not None and "v0_naive" in t.index and args[0] in t.columns:
+                    v = float(t.loc["v0_naive", args[0]])
+            if v is None:
                 raise Missing(f"v0 stride {args[0]} at {args[1]}")
-            v = float(t.loc["v0_naive", args[0]])
-            return f"{v / 1e6:,.0f} MB" if "bytes" in args[0] else (
-                f"{v:.1f}%" if args[0].endswith(".pct") else f"{v:,.4g}")
+            if "bytes" in args[0]:
+                return f"{v / 1e6:,.0f} MB"
+            if args[0].endswith(".pct"):
+                return f"{v:.1f}%"
+            if "duration" in args[0]:
+                return f"{v / 1e6:.1f} ms"
+            return f"{v / 1e6:,.1f} M"
+        if name == "conflicts_per_lds":  # {{conflicts_per_lds:K}}
+            c = self.ncu_val("smem", "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum", args[0])
+            return f"{c / self.ncu_val('smem', 'smsp__inst_executed_op_shared_ld.sum', args[0]):.1f}"
+        if name == "conflict_pct":  # {{conflict_pct:K1:K2}} K1 load conflicts as % of K2's
+            m = "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
+            return f"{100 * self.ncu_val('smem', m, args[0]) / self.ncu_val('smem', m, args[1]):.2f}%"
+        if name == "tune_count":
+            t = self.tune_rows()
+            return str(t.kernel.nunique())
+        if name == "conflict_ratio":  # {{conflict_ratio:K1:K2}} K1 load conflicts / K2's
+            m = "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
+            return f"{self.ncu_val('smem', m, args[0]) / self.ncu_val('smem', m, args[1]):,.0f}x"
         if name == "var":
             lo, hi, n = self.variability(args[0], int(args[1]))
             return f"{lo:,.0f}-{hi:,.0f} GFLOP/s ({n} runs)"

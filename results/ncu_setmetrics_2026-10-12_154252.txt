@@ -1,0 +1,34 @@
+l1tex__t_set_accesses                                                       Counter                         # of cache set accesses                                               
+l1tex__t_set_accesses_pipe_lsu                                              Counter                         # of cache set accesses for LSU pipe local/global                     
+l1tex__t_set_accesses_pipe_lsu_mem_global_op_atom                           Counter                         # of cache set accesses for global atomics                            
+l1tex__t_set_accesses_pipe_lsu_mem_global_op_ld                             Counter                         # of cache set accesses for global loads                              
+l1tex__t_set_accesses_pipe_lsu_mem_global_op_red                            Counter                         # of cache set accesses for global reductions                         
+l1tex__t_set_accesses_pipe_lsu_mem_global_op_st                             Counter                         # of cache set accesses for global stores                             
+l1tex__t_set_accesses_pipe_lsu_mem_local_op_ld                              Counter                         # of cache set accesses for local loads                               
+l1tex__t_set_accesses_pipe_lsu_mem_local_op_st                              Counter                         # of cache set accesses for local stores                              
+l1tex__t_set_accesses_pipe_tex                                              Counter                         # of cache set accesses for TEX pipe                                  
+l1tex__t_set_accesses_pipe_tex_mem_surface                                  Counter                         # of cache set accesses for surface                                   
+l1tex__t_set_accesses_pipe_tex_mem_surface_op_atom                          Counter                         # of cache set accesses for surface atomics                           
+l1tex__t_set_accesses_pipe_tex_mem_surface_op_ld                            Counter                         # of cache set accesses for surface loads                             
+l1tex__t_set_accesses_pipe_tex_mem_surface_op_red                           Counter                         # of cache set accesses for surface reductions                        
+l1tex__t_set_accesses_pipe_tex_mem_surface_op_st                            Counter                         # of cache set accesses for surface stores                            
+l1tex__t_set_accesses_pipe_tex_mem_texture                                  Counter                         # of cache set accesses for texture                                   
+l1tex__t_set_accesses_pipe_tex_mem_texture_op_ld                            Counter                         # of cache set accesses for TLD instructions                          
+l1tex__t_set_accesses_pipe_tex_mem_texture_op_tex                           Counter                         # of cache set accesses for TEX instructions                          
+l1tex__t_set_conflicts                                                      Counter         cycle           # of extra cycles spent on set conflicts                              
+l1tex__t_set_conflicts_pipe_lsu                                             Counter         cycle           # of extra cycles spent on set conflicts for LSU pipe local/global    
+l1tex__t_set_conflicts_pipe_lsu_mem_global_op_atom                          Counter         cycle           # of extra cycles spent on set conflicts for global atomics           
+l1tex__t_set_conflicts_pipe_lsu_mem_global_op_ld                            Counter         cycle           # of extra cycles spent on set conflicts for global loads             
+l1tex__t_set_conflicts_pipe_lsu_mem_global_op_red                           Counter         cycle           # of extra cycles spent on set conflicts for global reductions        
+l1tex__t_set_conflicts_pipe_lsu_mem_global_op_st                            Counter         cycle           # of extra cycles spent on set conflicts for global stores            
+l1tex__t_set_conflicts_pipe_lsu_mem_local_op_ld                             Counter         cycle           # of extra cycles spent on set conflicts for local loads              
+l1tex__t_set_conflicts_pipe_lsu_mem_local_op_st                             Counter         cycle           # of extra cycles spent on set conflicts for local stores             
+l1tex__t_set_conflicts_pipe_tex                                             Counter         cycle           # of extra cycles spent on set conflicts for TEX pipe                 
+l1tex__t_set_conflicts_pipe_tex_mem_surface                                 Counter         cycle           # of extra cycles spent on set conflicts for surface                  
+l1tex__t_set_conflicts_pipe_tex_mem_surface_op_atom                         Counter         cycle           # of extra cycles spent on set conflicts for surface atomics          
+l1tex__t_set_conflicts_pipe_tex_mem_surface_op_ld                           Counter         cycle           # of extra cycles spent on set conflicts for surface loads            
+l1tex__t_set_conflicts_pipe_tex_mem_surface_op_red                          Counter         cycle           # of extra cycles spent on set conflicts for surface reductions       
+l1tex__t_set_conflicts_pipe_tex_mem_surface_op_st                           Counter         cycle           # of extra cycles spent on set conflicts for surface stores           
+l1tex__t_set_conflicts_pipe_tex_mem_texture                                 Counter         cycle           # of extra cycles spent on set conflicts for texture                  
+l1tex__t_set_conflicts_pipe_tex_mem_texture_op_ld                           Counter         cycle           # of extra cycles spent on set conflicts for TLD instructions         
+l1tex__t_set_conflicts_pipe_tex_mem_texture_op_tex                          Counter         cycle           # of extra cycles spent on set conflicts for TEX instructions         
