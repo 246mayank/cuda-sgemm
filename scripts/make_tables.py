@@ -392,7 +392,7 @@ class Data:
         if name == "dispatch_pct":  # {{dispatch_pct:N}} the tuning-run % recorded in the table
             inc = ROOT / "src" / "kernels" / "v9_dispatch_table.inc"
             for line in inc.read_text(encoding="utf-8").splitlines():
-                m = re.match(r'\{(\d+), "[^"]+"\},\s*//\s*([\d.]+)%', line)
+                m = re.match(r'\{(\d+), "[^"]+"\},\s*//\s*(?:mean\s+)?([\d.]+)%', line)
                 if m and int(m.group(1)) == int(args[0]):
                     return f"{float(m.group(2)):.1f}%"
             raise Missing(f"dispatch pct for N={args[0]}")
