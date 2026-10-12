@@ -8,6 +8,9 @@
                                kernel placed at its MEASURED arithmetic intensity (Nsight
                                Compute DRAM bytes) and its benchmark GFLOP/s. Skipped, with a
                                message, if the ncu or bandwidth results are missing.
+  figures/roofline_tc.png      the same for the FP16 tensor-core track at N = 2048: measured
+                               DRAM roof, theoretical tensor-core peak, cublasGemmEx as the
+                               practical ceiling, tc kernels at their measured intensity.
 
 A kernel that FAILED the cuBLAS check at any size is left out of every figure, and the
 failing sizes are listed in the figure note.
@@ -18,8 +21,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from results_io import (FIGURES, KERNEL_ORDER, kernels_in, load_bandwidth, load_ncu, load_run,
-                        parse_args, peak_fp32_gflops)
+import json
+
+import pandas as pd
+
+from results_io import (FIGURES, KERNEL_ORDER, TC_KERNELS, kernels_in, load_bandwidth, load_ncu,
+                        load_run, newest, parse_args, peak_fp32_gflops)
 
 # Reference categorical palette (light mode): 8 validated slots. Line and roofline charts show a
 # fixed set of key kernels (the in-between versions sit almost on top of a neighbour and would
@@ -28,6 +35,7 @@ SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#625
 PLOTTED = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
            "v4_2d_blocktiling", "v7_conflict_free", "v12_dispatch"]
 COLOR = dict(zip(PLOTTED, SLOTS))
+TC_COLOR = dict(zip(TC_KERNELS, SLOTS))  # separate figure, so the slots restart
 
 
 def omitted_note(ks):
@@ -146,6 +154,22 @@ def pct_cublas(df, env, csv_path):
 ROOFLINE_N = 2048  # size profiled by the ncu cells in the notebook
 
 
+def label_points(ax, placed, step=1.25, window=3.5):
+    """Direct labels for (name, x, y) points on log axes. Points that nearly coincide get labels
+    stacked below them with a thin leader line, so no two labels overlap."""
+    label_y = []
+    for k, ai, g in sorted(placed, key=lambda p: -p[2]):
+        ly = g
+        for (px, py) in label_y:
+            if 1 / window < ai / px < window and ly > py / step:
+                ly = py / step
+        label_y.append((ai, ly))
+        moved_label = ly < g / 1.01
+        ax.annotate(k, (ai, g), xytext=(ai * 1.25, ly), textcoords="data", va="center",
+                    color=INK2, fontsize=8,
+                    arrowprops=dict(arrowstyle="-", color=GRID, lw=0.8) if moved_label else None)
+
+
 def roofline(df, env, csv_path):
     ncu, ncu_path = load_ncu("dram")
     bw, bw_path = load_bandwidth()
@@ -200,19 +224,7 @@ def roofline(df, env, csv_path):
                    label=k)
         placed.append((k, ai, g))
 
-    # Labels: points that nearly coincide (v4-v6) get stacked labels below them, with a
-    # thin leader line, so no two labels overlap.
-    label_y = []
-    for k, ai, g in sorted(placed, key=lambda p: -p[2]):
-        ly = g
-        for (px, py) in label_y:
-            if 1 / 3.5 < ai / px < 3.5 and ly > py / 1.25:
-                ly = py / 1.25
-        label_y.append((ai, ly))
-        moved_label = ly < g / 1.01
-        ax.annotate(k, (ai, g), xytext=(ai * 1.25, ly), textcoords="data", va="center",
-                    color=INK2, fontsize=8,
-                    arrowprops=dict(arrowstyle="-", color=GRID, lw=0.8) if moved_label else None)
+    label_points(ax, placed)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -234,12 +246,96 @@ def roofline(df, env, csv_path):
     return out
 
 
+def roofline_tc():
+    """Tensor-core track roofline at ROOFLINE_N, from the newest tc_* results."""
+    import numpy as np
+    ncu, ncu_path = load_ncu("tcdram")
+    bw, bw_path = load_bandwidth()
+    tc_path = newest("tc_sgemm_*.csv")
+    env_path = tc_path.with_name(tc_path.name.replace("tc_sgemm_", "tc_env_", 1)).with_suffix(".json") \
+        if tc_path else None
+    if ncu is None or bw is None or tc_path is None or not env_path.exists():
+        missing = [n for n, v in (("ncu_tcdram_*.csv", ncu), ("bandwidth_*.csv", bw),
+                                  ("tc_sgemm_*.csv + tc_env_*.json", tc_path and env_path.exists()))
+                   if not (v is not None and v is not False)]
+        print("tensor-core roofline skipped, missing:", ", ".join(missing))
+        return None
+    env = json.loads(env_path.read_text(encoding="utf-8"))
+    d = pd.read_csv(tc_path)
+    n = ROOFLINE_N
+    flop = 2.0 * n ** 3
+    at_n = d[d.M == n]
+    if at_n.empty:
+        print(f"tensor-core roofline skipped: no N = {n} rows in {tc_path.name}")
+        return None
+    # Peak: SMs x 8 tensor cores x 64 FMA per clock x 2 FLOP x max SM clock (TFLOP/s).
+    peak = env["sm_count"] * 8 * 64 * 2 * env["sm_clock_max_khz"] * 1e3 / 1e12
+    mem_roof = bw.gbps_median.max() / 1000  # TB/s, so the roof is in TFLOP/s directly
+    paired = at_n.cublas_paired_median_ms.dropna() if "cublas_paired_median_ms" in at_n else []
+    ref = (flop / (paired.median() * 1e9) if len(paired)
+           else at_n[at_n.kernel == "cublas"].gflops.iloc[0] / 1000)
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    x = [1, 3000]
+    xs = np.logspace(np.log10(x[0]), np.log10(x[1]), 200)
+    ax.plot(xs, np.minimum(xs * mem_roof, peak), color=INK, lw=2)
+    ax.axhline(ref, color=REF, lw=1.5, ls="--")
+    ax.text(x[1], peak * 1.08, f"tensor-core peak {peak:,.1f} TFLOP/s (theoretical)  ", ha="right",
+            va="bottom", color=INK2, fontsize=8)
+    ax.text(x[1], ref * 1.06, f"cublasGemmEx {ref:,.1f} TFLOP/s (practical)  ",
+            ha="right", va="bottom", color=INK2, fontsize=8)
+    ax.text(1.15, 1.2, f"measured DRAM roof\n{mem_roof * 1000:.0f} GB/s", ha="left",
+            va="bottom", color=INK, fontsize=8)
+
+    placed = []
+    for k in [k for k in TC_KERNELS if k in set(at_n.kernel)]:
+        r = at_n[at_n.kernel == k].iloc[0]
+        if r.status != "PASS" or k not in ncu.index:
+            continue
+        moved = ncu.loc[k].get("dram__bytes_read.sum", np.nan) + ncu.loc[k].get("dram__bytes_write.sum", np.nan)
+        if not moved > 0:
+            continue
+        ai, tf = flop / moved, r.gflops / 1000
+        ax.scatter([ai], [tf], s=60, color=TC_COLOR.get(k, INK2), edgecolor=SURFACE, lw=2, zorder=3,
+                   label=k)
+        placed.append((k, ai, tf))
+    # Labels in a column to the right of the cluster, stacked top-down, with leader lines.
+    ly = None
+    for k, ai, tf in sorted(placed, key=lambda p: -p[2]):
+        if ai < 100:  # isolated point (tc0): label beside it
+            ax.annotate(k, (ai, tf), xytext=(7, 0), textcoords="offset points", va="center",
+                        color=INK2, fontsize=8)
+            continue
+        ly = tf if ly is None else min(tf, ly / 1.22)
+        ax.annotate(k, (ai, tf), xytext=(700, ly), textcoords="data", va="center", color=INK2,
+                    fontsize=8, arrowprops=dict(arrowstyle="-", color=GRID, lw=0.8))
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(*x)
+    ax.set_ylim(0.5, peak * 3)
+    ax.set_xlabel("arithmetic intensity (FLOP per DRAM byte, measured with Nsight Compute)")
+    ax.set_ylabel("TFLOP/s (log scale)")
+    ax.set_title(f"Tensor-core roofline (FP16 in, FP32 accumulate), N = {n}", loc="left",
+                 fontsize=13, color=INK, pad=30)
+    ax.text(0, 1.01, f"{env['gpu_name']}; peak = SMs x 8 tensor cores x 64 FMA/clk x 2 x max clock; "
+            f"source: {tc_path.name}\nDRAM bytes: {ncu_path.name}; bandwidth: {bw_path.name}",
+            transform=ax.transAxes, fontsize=7, color=INK2)
+    if placed:
+        ax.legend(loc="center left", fontsize=8)
+    fig.tight_layout()
+    out = FIGURES / "roofline_tc.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
 def main():
     args = parse_args(__doc__)
     df, env, csv_path = load_run(args.csv)
     FIGURES.mkdir(exist_ok=True)
     for out in (gflops_vs_size(df, env, csv_path), pct_cublas(df, env, csv_path),
-                roofline(df, env, csv_path)):
+                roofline(df, env, csv_path), roofline_tc()):
         if out:
             print("wrote", out.relative_to(FIGURES.parent))
 
