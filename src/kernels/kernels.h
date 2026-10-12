@@ -59,3 +59,11 @@ void launch_tc3_ptx_mma(int M, int N, int K, const half* A, const half* B, float
 KernelResources resources_tc3_ptx_mma();
 void launch_tc4_ptx_bk32(int M, int N, int K, const half* A, const half* B, float* C);
 KernelResources resources_tc4_ptx_bk32();
+
+// Tensor-core tuning sweep (bench --tc-tune): tc1's WMMA kernel templated over its tile shape.
+struct TcConfig {
+    const char* name;  // tc5_<BM>x<BN>x<BK>_w<WARPS_M>x<WARPS_N>_b<MINB>
+    void (*launch)(int, int, int, const half*, const half*, float*);
+    KernelResources (*resources)();
+};
+const std::vector<TcConfig>& tc5_tune_configs();

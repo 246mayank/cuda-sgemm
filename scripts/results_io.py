@@ -114,6 +114,11 @@ def bench_name(kernel_symbol):
         return "v14_{}x{}x{}_{}x{}_b{}_s{}".format(*d)
     if re.search(r"sgemm_v11(?:<|I)", s):  # v11 split-K template
         return "v11_splitk"
+    m = re.search(r"tc5_wmma_tuned_kernel(?:<\s*" + r",\s*".join([r"(\d+)"] * 6) + r"\s*>|"
+                  + r"ILi(\d+)E" + "".join([r"Li(\d+)E"] * 5) + ")", s)
+    if m:  # tensor-core tuning sweep: tc5_<BM>x<BN>x<BK>_w<WARPS_M>x<WARPS_N>_b<MINB>
+        d = tuple(int(g) for g in m.groups() if g is not None)
+        return "tc5_{}x{}x{}_w{}x{}_b{}".format(*d)
     for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel
         if name in s:
             return name

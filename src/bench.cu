@@ -30,6 +30,8 @@
 //                   inputs; sizes that are multiples of 128; prefix "tc_"; default tolerance
 //                   1e-3. Also writes tc_precision_*.csv: how far the FP16-input result is
 //                   from FP32 SGEMM (the precision cost of FP16 inputs, not a kernel error).
+//   --tc-tune       tensor-core tuning sweep: the tc5 configurations (tc1's WMMA kernel over
+//                   several tile shapes), run exactly like --tc; prefix "tctune_"
 //   --shapes        rectangular GEMMs of the kind found in transformer layers (M = tokens,
 //                   N/K = hidden or FFN width), for v4, v7, v9 vs cuBLAS; prefix "shapes_"
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
@@ -85,8 +87,8 @@ int main(int argc, char** argv) {
     std::string kernel_filter;
     int only_size = 0, warmup = 3, reps = 20;
     double tol = 1e-4;
-    bool write = true, tune = false, tc = false, shapes_mode = false, prefix_set = false,
-         tol_set = false;
+    bool write = true, tune = false, tc = false, tc_tune = false, shapes_mode = false,
+         prefix_set = false, tol_set = false;
     std::string prefix;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -102,6 +104,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-write") write = false;
         else if (a == "--tune") tune = true;
         else if (a == "--tc") tc = true;
+        else if (a == "--tc-tune") tc = tc_tune = true;  // same FP16 path as --tc
         else if (a == "--shapes") shapes_mode = true;
         else if (a == "--prefix") { prefix = next(); prefix_set = true; }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
@@ -180,6 +183,15 @@ int main(int argc, char** argv) {
         };
         if (!prefix_set) prefix = "tc_";
         if (!tol_set) tol = 1e-3;
+        if (tc_tune) {  // same FP16 inputs / reference / sizes, different kernel list
+            all.clear();
+            for (const TcConfig& c : tc5_tune_configs())
+                all.push_back({c.name,
+                               [&, f = c.launch](int M, int N, int K, const float*, const float*,
+                                                 float* C) { f(M, N, K, dAh, dBh, C); },
+                               c.resources, 1 << 30});
+            if (!prefix_set) prefix = "tctune_";
+        }
     }
     if (shapes_mode) {
         std::vector<Kernel> keep;
