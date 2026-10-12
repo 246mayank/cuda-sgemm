@@ -136,6 +136,19 @@ class Data:
         if name == "speedup":
             a, b = self.row(args[0], args[2]).gflops, self.row(args[1], args[2]).gflops
             return f"{a / b:.1f}x"
+        if name in ("best_kernel", "best_gflops", "best_pct"):  # {{best_*:N}} by % of paired cuBLAS
+            n = int(args[0])
+            d = self.df[(self.df.M == n) & (self.df.status == "PASS")]
+            if d.empty:
+                raise Missing(f"no PASS rows at N={n}")
+            b = d.loc[d.pct_cublas.idxmax()]
+            return {"best_kernel": f"`{b.kernel}`", "best_gflops": f2(b.gflops),
+                    "best_pct": f"{b.pct_cublas:.1f}%"}[name]
+        if name == "best_speedup_vs":  # {{best_speedup_vs:K:N}} best kernel GFLOP/s / K's at N
+            n = int(args[1])
+            d = self.df[(self.df.M == n) & (self.df.status == "PASS")]
+            b = d.loc[d.pct_cublas.idxmax()]
+            return f"{b.gflops / self.row(args[0], n).gflops:.1f}x"
         if name == "sizeratio":  # same kernel, GFLOP/s at N1 / GFLOP/s at N2
             a, b = self.row(args[0], args[1]).gflops, self.row(args[0], args[2]).gflops
             return f"{a / b:.1f}x"
@@ -387,6 +400,29 @@ class Data:
                             "shared-store bank conflicts", "FFMA share of instructions"],
                            rows))
 
+    def t_bankmodel(self):
+        p = RESULTS / "model_bank_conflicts.csv"
+        if not p.exists():
+            raise Missing("model_bank_conflicts.csv (run scripts/bank_model.py)")
+        m = pd.read_csv(p)
+        rows = []
+        for _, r in m.iterrows():
+            def meas(metric):
+                try:
+                    return f"{self.ncu_val('smem', metric, r.kernel):,.0f}"
+                except Missing:
+                    return "not profiled"
+            ld = meas("l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum")
+            st = meas("l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum")
+            rows.append([kname(r.kernel), f"{r.predicted_ld_conflicts:,}", ld,
+                         f"{r.predicted_st_conflicts:,}", st])
+        return (f"Shared-memory bank conflicts at N = {m.N.iloc[0]}: the analytical model in "
+                "[`scripts/bank_model.py`](scripts/bank_model.py) (lane addresses from the kernel "
+                "source + the 32-bank / 8-lanes-per-128-bit-phase rule) next to Nsight Compute's "
+                "counters:\n\n"
+                + md_table(["kernel", "model: load", "ncu: load", "model: store", "ncu: store"],
+                           rows))
+
     def t_sass(self):
         if self.sass is None:
             raise Missing("sass_*.txt.gz")
@@ -412,8 +448,8 @@ class Data:
         if self.tune is None:
             raise Missing("tune_sgemm_*.csv")
         t = self.tune[self.tune.kernel != "cublas"].copy()
-        dims = t.kernel.str.extract(r"v7_(\d+)x(\d+)x(\d+)_(\d+)x(\d+)").astype(float)
-        t[["BM", "BN", "BK", "TM", "TN"]] = dims.values
+        dims = t.kernel.str.extract(r"v\d_(\d+)x(\d+)x(\d+)_").astype(float)
+        t[["BM", "BN", "BK"]] = dims.values
         if self.tune_res is not None:
             t = t.merge(self.tune_res, on="kernel", how="left")
             slots = self.env["sm_count"] * t.blocks_per_sm
@@ -446,8 +482,9 @@ class Data:
                         if "waves" in g else f"N = {s}: `{b.kernel}` ({b.pct_cublas:.0f}%)")
         note = ("" if not failed else
                 "\n\nFailed the cuBLAS check (excluded): " + ", ".join(f"`{k}`" for k in failed))
-        return ("% of paired cuBLAS for each tile configuration of the v7 kernel "
-                "(name = v7_<BM>x<BN>x<BK>_<TM>x<TN>: block tile, then thread tile), from "
+        return ("% of paired cuBLAS for each tile configuration (v7_<BM>x<BN>x<BK>_<TM>x<TN>: "
+                "block tile, then thread tile; v8_<BM>x<BN>x<BK>_w<WM>x<WN>_<WMITER>x<WNITER>: "
+                "block tile, warp tile, pieces per thread), from "
                 f"`results/{self.tune_path.name}`:\n\n"
                 + md_table(["config", "threads", "registers", "blocks/SM"]
                            + [f"N={s}" for s in sizes], rows)
@@ -551,7 +588,8 @@ class Data:
                                                          ).with_suffix(".json"),
                  self.res_path, self.bw_path, *self.ncu_paths.values(),
                  *(p for _, p in self.stride.values()), self.sass_path, self.tune_path,
-                 self.locked_path]
+                 self.locked_path, RESULTS / "model_bank_conflicts.csv"]
+        files = [p for p in files if p is None or p.exists()]
         return "\n".join(f"- `results/{p.name}`" for p in files if p is not None)
 
 

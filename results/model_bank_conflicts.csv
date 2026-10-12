@@ -1,0 +1,5 @@
+kernel,N,predicted_ld_conflicts,predicted_st_conflicts
+v5_vectorized,2048,33554432,2097152
+v6_double_buffered,2048,33554432,2097152
+v7_conflict_free,2048,0,0
+v8_warptiling,2048,0,0

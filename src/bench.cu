@@ -23,8 +23,8 @@
 //                   the reference)
 //   --size 2048     run only this square size
 //   --no-write      print results but write no files (used for the Nsight Compute probe)
-//   --tune          run the v7 tuning study (12 tile shapes of the same kernel) instead of the
-//                   v0-v7 series; files get the prefix "tune_" unless --prefix is given
+//   --tune          run the tuning study (12 tile shapes of v7, 6 warp-tile shapes of v8)
+//                   instead of the v0-v8 series; files get the prefix "tune_" unless --prefix is given
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
 //                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
@@ -120,11 +120,12 @@ int main(int argc, char** argv) {
         {"v5_vectorized", launch_v5_vectorized, resources_v5_vectorized, 1 << 30},
         {"v6_double_buffered", launch_v6_double_buffered, resources_v6_double_buffered, 1 << 30},
         {"v7_conflict_free", launch_v7_conflict_free, resources_v7_conflict_free, 1 << 30},
+        {"v8_warptiling", launch_v8_warptiling, resources_v8_warptiling, 1 << 30},
     };
     if (tune) {
         all.clear();
-        for (const TuneConfig& c : v7_tune_configs())
-            all.push_back({c.name, c.launch, c.resources, 1 << 30});
+        for (const auto* list : {&v7_tune_configs(), &v8_tune_configs()})
+            for (const TuneConfig& c : *list) all.push_back({c.name, c.launch, c.resources, 1 << 30});
         if (!prefix_set) prefix = "tune_";
     }
     std::vector<Kernel> kernels;

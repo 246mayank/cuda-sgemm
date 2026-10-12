@@ -17,7 +17,8 @@ FIGURES = ROOT / "figures"
 # Kernel order for tables and fixed color slots for plots. Colors follow the kernel, so
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
-                "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free"]
+                "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free",
+                "v8_warptiling"]
 
 
 def parse_args(description):
@@ -75,6 +76,7 @@ def load_bandwidth():
 
 
 V7_DEFAULT = (128, 128, 8, 8, 8)
+V8_DEFAULT = (128, 128, 8, 64, 32, 2, 2)
 
 
 def bench_name(kernel_symbol):
@@ -88,6 +90,12 @@ def bench_name(kernel_symbol):
     if m:
         dims = tuple(int(g) for g in m.groups() if g is not None)
         return "v7_conflict_free" if dims == V7_DEFAULT else "v7_{}x{}x{}_{}x{}".format(*dims)
+    m = re.search(r"sgemm_v8(?:<\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*>|"
+                  r"ILi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)ELi(\d+)E)", s)
+    if m:
+        d = tuple(int(g) for g in m.groups() if g is not None)
+        return ("v8_warptiling" if d == V8_DEFAULT
+                else "v8_{}x{}x{}_w{}x{}_{}x{}".format(*d))
     for name in sorted(KERNEL_ORDER, key=len, reverse=True):  # known names first
         if "sgemm_" + name in s:
             return name

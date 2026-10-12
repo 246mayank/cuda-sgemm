@@ -571,6 +571,8 @@ mostly *stalls* (conflicts, latency, a throttled clock), not wasted instructions
   1.04x; the best measured kernel at 60.4% of cuBLAS at N = 4096.
 - **v7 conflict-free:** a fragment remap plus padding 128 → 132, targeting 0 bank conflicts.
   Pending Colab run 5.
+- **v8 warp tiling:** block tile → warp tile (64×32) → thread tile (2×2 pieces of 4×4). A warp
+  requests 96 distinct shared floats per k instead of 144. Pending Colab run.
 
 ### Five numbers to remember (final run, `results/`)
 1. **2,884 GFLOP/s = 60.4% of cuBLAS** at N = 4096 (v6); 63.4% at N = 2048.
@@ -579,6 +581,85 @@ mostly *stalls* (conflicts, latency, a throttled clock), not wasted instructions
 4. DRAM traffic **44.9x → 4.1x** the minimum (v0 → v6); measured bandwidth **234 GB/s**.
 5. **33,554,432 bank conflicts** (2 per shared-load instruction) in v4–v6, and the FFMA share
    of instructions going from **22% to 87%**.
+
+---
+
+## 13. Warp tiling (v8)
+
+### The concept
+A GPU schedules **warps**, not threads, and a warp's shared-memory request is served as one
+unit. So the useful question isn't "how many values does a thread load per k?" but "how many
+*distinct* values does a warp ask for?". Lanes asking for the same value get it broadcast for
+free.
+
+High-performance SGEMM (CUTLASS, cuBLAS) uses three levels of tiling:
+
+```
+block tile 128x128   (shared memory; one per thread block)
+  └─ warp tile 64x32 (8 warps arranged 2 x 4)
+       └─ thread tile: 2 x 2 pieces of 4x4 = 64 outputs per thread
+```
+
+### In our code
+[`src/kernels/v8_warptiling.cu`](../src/kernels/v8_warptiling.cu). Each thread computes its
+position in two steps: `warp = tid / 32` picks the warp tile, and `lane = tid % 32` picks the
+spot inside it (`trw = lane / 4`, `tcw = lane % 4`). The global→shared copy is identical to v7;
+only the compute mapping changes.
+
+### The arithmetic (checked by CPU emulation)
+Distinct floats one warp requests from shared memory per k step:
+
+| | A floats | B floats | total |
+|---|---|---|---|
+| v7 (16×2 thread grid, pieces 64 apart) | 16 | 128 | **144** |
+| v8 (8×4 lanes inside a 64×32 warp tile) | 64 | 32 | **96** |
+
+Same FMAs, a third less shared-memory traffic. v7 is lopsided (16 vs 128) because a warp spans
+just 2 thread-rows but all 16 thread-columns. A square-ish warp tile balances the two.
+
+### Interview questions
+- **Why tile at the warp level if each thread's loads are unchanged?** Shared-memory bandwidth
+  is consumed per warp request, by distinct addresses. A compact warp tile turns more of each
+  request into broadcasts, so fewer bytes cross the shared-memory crossbar per FMA.
+- **How does this map to CUTLASS?** CUTLASS names the same three levels "threadblock tile",
+  "warp tile" and "thread (instruction) tile". On tensor-core GPUs the warp tile is exactly what
+  a warp feeds to `mma` instructions.
+- **What constrains the warp tile shape?** It must split into exactly 32 lane positions
+  (`(WSUBM/4) * (WSUBN/4) == 32`), the block tile must be a whole number of warp tiles, and the
+  accumulators (64 per thread here) must fit the register budget.
+
+---
+
+## 14. Predicting bank conflicts analytically
+
+### The idea
+Bank conflicts are deterministic: they depend only on which addresses each lane touches in one
+instruction. So they can be computed without a GPU. Replay the kernel's index arithmetic for
+one warp, group addresses into phases, and count the extra cycles.
+
+### The rules we model
+- 32 banks, each 4 bytes wide. Bank = (word address) mod 32.
+- A 32-bit access is served for all 32 lanes together; a 128-bit access in **4 phases of 8
+  lanes**.
+- In one phase, lanes reading the *same* word get a broadcast (free). Two *different* words in
+  the same bank cost one extra cycle each.
+
+### Result
+[`scripts/bank_model.py`](../scripts/bank_model.py) predicts **33,554,432** load conflicts and
+**2,097,152** store conflicts for v5 and v6 at N = 2048. Those are exactly the Nsight Compute
+counts. The scaling: 64 extra cycles per warp per tile × 8 warps × 256 tiles × 256 blocks. For
+v7 and v8 the model predicts 0, which run 5 tests.
+
+### Interview questions
+- **How would you check a shared-memory layout before running it?** Write down each lane's
+  addresses for one instruction, compute `address mod 32` per phase, and look for two different
+  addresses in one bank. That's exactly what the script does.
+- **Why is padding 128 → 132 enough for the transposed A store?** Two threads that collided
+  wrote rows 4 apart in k, i.e. 4×128 = 512 words apart, and 512 mod 32 = 0 means the same bank.
+  With a stride of 132 they're 528 apart, and 528 mod 32 = 16: a different bank. 132 is still a
+  multiple of 4, so float4 reads stay 16-byte aligned.
+- **Why don't broadcasts conflict?** The bank delivers one word per cycle to every lane that
+  asked for that word, so many lanes reading one address cost one access.
 
 ---
 

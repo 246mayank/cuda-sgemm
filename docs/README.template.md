@@ -7,10 +7,9 @@ instruction mix. **Every number in this README is generated from the CSVs in
 [`results/`](results/)** by [`scripts/make_tables.py`](scripts/make_tables.py); none is typed
 by hand.
 
-**Result.** The fastest kernel, `v6_double_buffered`, reaches **{{gflops:v6_double_buffered:4096}}
-GFLOP/s at N = 4096, {{pct:v6_double_buffered:4096}} of cuBLAS** timed in the same thermal state
-({{pct:v6_double_buffered:2048}} at N = 2048). That is {{speedup:v6_double_buffered:v0_naive:2048}}
-the naive kernel at N = 2048. All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
+**Result.** The fastest kernel at N = 4096, {{best_kernel:4096}}, reaches **{{best_gflops:4096}}
+GFLOP/s, {{best_pct:4096}} of cuBLAS** timed in the same thermal state. At N = 2048 the fastest is
+{{best_kernel:2048}} ({{best_pct:2048}}), {{best_speedup_vs:v0_naive:2048}} the naive kernel. All {{npass}} of {{nrows}} kernel/size results pass the cuBLAS check
 (largest normwise relative error {{maxerr}}, tolerance {{tol}}), including the non-multiple
 sizes 1000 and 1023.
 
@@ -211,18 +210,87 @@ Measured: **{{pspeedup:v6_double_buffered:v5_vectorized:4096}} vs v5** at N = 40
 {{pspeedup:v6_double_buffered:v5_vectorized:2048}} at N = 2048. A small gain: with 2 blocks
 per SM, the hardware was already overlapping one block's loads with the other's math.
 
-### What still separates v6 from cuBLAS
+### v7: conflict-free shared memory ([`v7_conflict_free.cu`](src/kernels/v7_conflict_free.cu))
 
-- **The clock.** This is the biggest factor, and it isn't specific to v6. The fastest single
-  timed run of v6 at N = 4096 reached {{gflops_min:v6_double_buffered:4096}} GFLOP/s, the median
-  {{gflops:v6_double_buffered:4096}}. The difference is the T4 throttling to stay within {{power_limit}}
-  (table in Methodology).
-- **Occupancy and scheduling.** 64 accumulators per thread hold v4–v6 at {{occ:v4_2d_blocktiling}} occupancy, and
-  ncu still reports shared-memory bank conflicts. cuBLAS-class kernels add warp-level tiling
-  so each warp's accesses are conflict-free, use a deeper K tile, and pick a tile shape per size.
-- **Small sizes.** At N = 256 a 128×128 tile gives just 4 blocks for {{sm_count}} SMs, so v3's smaller
-  tile wins there ({{gflops:v3_1d_blocktiling:256}} vs {{gflops:v6_double_buffered:256}}
-  GFLOP/s).
+**Diagnosis.** In v4–v6, every shared-load instruction had exactly two bank conflicts. Shared
+memory has 32 banks of 4 bytes, and a 128-bit load is served in 4 phases of 8 threads. In v6,
+the 8 threads of a phase read B at columns 0, 8, 16, …, 56. Those 16-byte slots are 32 bytes
+apart, so threads 0 and 4, 1 and 5, and so on collide on the same banks.
+
+**The fix changes only which outputs a thread owns.** Each thread now holds four 4×4 pieces 64
+rows/columns apart, instead of one 8×8 square. A phase then reads columns 0, 4, …, 28: 128
+contiguous bytes, which is conflict-free. The transposed A tile is padded from 128 to 132 floats
+per row, so its stores no longer collide either. The output strips are now contiguous, so C is
+written with 128-bit stores.
+
+Measured: **{{pspeedup:v7_conflict_free:v6_double_buffered:4096}} vs v6** at N = 4096
+({{gflops:v7_conflict_free:4096}} GFLOP/s, {{pct:v7_conflict_free:4096}} of cuBLAS) and
+{{pspeedup:v7_conflict_free:v6_double_buffered:2048}} at N = 2048. Bank conflicts at N = 2048:
+{{bank_conflicts:v7_conflict_free}} on loads and {{bank_conflicts_st:v7_conflict_free}} on stores,
+against {{bank_conflicts:v6_double_buffered}} and {{bank_conflicts_st:v6_double_buffered}} for v6.
+<!-- FINALIZE AFTER RUN: one sentence interpreting the v7 speedup given 0 conflicts. -->
+
+**The conflict counts were predicted before the run.**
+[`scripts/bank_model.py`](scripts/bank_model.py) replays each kernel's shared-memory addresses
+for one warp and applies the bank rules. For v5 and v6 it reproduces Nsight Compute's counts
+exactly:
+
+{{table:bankmodel}}
+
+### v8: warp tiling ([`v8_warptiling.cu`](src/kernels/v8_warptiling.cu))
+
+v8 adds a level between the block and the thread, the way CUTLASS and cuBLAS organise SGEMM:
+block tile → **warp tile** → thread tile.
+- The 8 warps of a block each own a contiguous 64×32 piece of the 128×128 tile.
+- Inside it, each thread computes 2×2 pieces of 4×4.
+
+Per k step a thread loads exactly what it did in v7 (8 A + 8 B values). But the warp as a whole
+asks shared memory for **96 distinct floats instead of 144**: more lanes share each value. That
+cuts shared-memory bandwidth per FMA by a third. Reads stay conflict-free (see the model table
+above).
+
+Measured: **{{pspeedup:v8_warptiling:v7_conflict_free:4096}} vs v7** at N = 4096
+({{gflops:v8_warptiling:4096}} GFLOP/s, {{pct:v8_warptiling:4096}} of cuBLAS) and
+{{pspeedup:v8_warptiling:v7_conflict_free:2048}} at N = 2048. {{regs:v8_warptiling}} registers
+per thread, {{spill:v8_warptiling}} bytes spilled.
+<!-- FINALIZE AFTER RUN: interpretation. -->
+
+### Tuning study: one kernel, many tile shapes
+
+The v7 and v8 kernels are C++ templates over their tile sizes, so `./bench --tune` can run 18
+configurations of the same code at every size, all verified against cuBLAS:
+- **v7:** 12 block/thread tile shapes;
+- **v8:** 6 warp-tile shapes.
+
+The number to watch is **waves**. With {{sm_count}} SMs × (blocks per SM) slots, a grid of B blocks
+runs in B / slots waves. A fractional last wave leaves SMs idle, and fewer than one wave means
+SMs are idle the whole time.
+- At N = 256 a 128×128 tile gives {{tune_waves:v7_128x128x8_8x8:256}} waves.
+- A 32×32 tile gives {{tune_waves:v7_32x32x8_4x4:256}} waves.
+
+{{table:tune}}
+
+<!-- FINALIZE AFTER RUN: what the best-per-size pattern shows. Caveat: picking the best of many
+noisy measurements biases the winner upward (winner's curse). -->
+
+### What the compiler actually emitted (SASS)
+
+"The compiler already vectorised v4's shared loads" is checked in the machine code: `cuobjdump
+-sass` on the built binary, counting instructions per kernel:
+
+{{table:sass}}
+
+<!-- FINALIZE AFTER RUN: point to v4's LDS.128 count, v5's LDG.128, v7's STG.128. -->
+
+### What still separates the best kernel from cuBLAS
+
+- **The clock.** The fastest single timed run of {{best_kernel:4096}} at N = 4096 is far above
+  its median; the T4 throttles to stay within {{power_limit}} (table in Methodology).
+- **Occupancy.** 64 accumulators per thread cap v4–v8 at {{occ:v4_2d_blocktiling}} theoretical
+  occupancy.
+- **Tile choice per size.** At N = 256, v3's smaller tile beats every 128×128 kernel
+  ({{gflops:v3_1d_blocktiling:256}} vs {{gflops:v6_double_buffered:256}} GFLOP/s for v6), which is
+  what the tuning study quantifies.
 
 ## Methodology
 
