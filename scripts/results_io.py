@@ -18,7 +18,8 @@ FIGURES = ROOT / "figures"
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
                 "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free",
-                "v8_warptiling", "v9_autotuned", "v11_splitk", "v12_dispatch"]
+                "v8_warptiling", "v9_autotuned", "v11_splitk", "v12_dispatch",
+                "v15_splitk_det"]
 
 
 def parse_args(description):
@@ -112,6 +113,8 @@ def bench_name(kernel_symbol):
     if m:
         d = tuple(int(g) for g in m.groups() if g is not None)
         return "v14_{}x{}x{}_{}x{}_b{}_s{}".format(*d)
+    if re.search(r"sgemm_v15(?:<|I)", s):  # v15 deterministic split-K template
+        return "v15_splitk_det"
     if re.search(r"sgemm_v11(?:<|I)", s):  # v11 split-K template
         return "v11_splitk"
     for name in TC_KERNELS:  # tensor-core track: symbol is <name>_kernel

@@ -140,6 +140,7 @@ int main(int argc, char** argv) {
         {"v9_autotuned", launch_v9_autotuned, resources_v9_autotuned, 1 << 30},
         {"v11_splitk", launch_v11_splitk, resources_v11_splitk, 1 << 30},
         {"v12_dispatch", launch_v12_dispatch, resources_v12_dispatch, 1 << 30},
+        {"v15_splitk_det", launch_v15_splitk_det, resources_v15_splitk_det, 1 << 30},
     };
     // Tensor-core track: launchers read the FP16 copies (dAh, dBh) made for each size; the
     // reference is cublasGemmEx on the same FP16 inputs with FP32 output and FP32 compute.
@@ -185,7 +186,8 @@ int main(int argc, char** argv) {
         std::vector<Kernel> keep;
         for (auto& k : all)
             if (k.name == "v4_2d_blocktiling" || k.name == "v7_conflict_free" || k.name == "v9_autotuned" ||
-                k.name == "v11_splitk" || k.name == "v12_dispatch")
+                k.name == "v11_splitk" || k.name == "v12_dispatch" ||
+                k.name == "v15_splitk_det")
                 keep.push_back(k);
         all = keep;
         if (!prefix_set) prefix = "shapes_";

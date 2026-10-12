@@ -57,6 +57,7 @@ IDEAS = {  # one line per kernel for the README's progression table (text, not d
     "v9_autotuned": "per-size tile chosen from a tuning sweep",
     "v11_splitk": "split-K when the grid can't fill the GPU",
     "v12_dispatch": "picks v9 or v11 by grid fill",
+    "v15_splitk_det": "split-K with a fixed-order sum (bit-reproducible)",
 }
 NCU_N = 2048  # size profiled by the ncu cells in the notebook
 
@@ -727,10 +728,10 @@ class Data:
             cub = g[g.kernel == "cublas"]
             rows.append([f"{m} × {n} × {k}", f"{cub.gflops.iloc[0]:,.0f}" if not cub.empty else "",
                          cell("v4_2d_blocktiling"), cell("v7_conflict_free"), cell("v9_autotuned"),
-                         cell("v11_splitk"), cell("v12_dispatch")])
+                         cell("v11_splitk"), cell("v12_dispatch"), cell("v15_splitk_det")])
         return (f"M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of "
                 f"paired cuBLAS, from `results/{p.name}`:\n\n"
-                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11", "v12"], rows))
+                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11", "v12", "v15"], rows))
 
     def t_locked(self):
         if self.locked is None:
