@@ -342,7 +342,6 @@ Results for the 64×128 tile at N = 4096:
   spill ({{tune_res:v10_64x128x8_8x8_b5_s0:local_bytes_per_thread}},
   {{tune_res:v10_96x128x8_8x8_b3_s0:local_bytes_per_thread}} and
   {{tune_res:v10_64x192x8_8x8_b3_s0:local_bytes_per_thread}} bytes per thread) and lose.
-<!-- FINALIZE AFTER FINAL RUN: re-check the swizzle scatter claim against the final tuning file. -->
 
 ### What the compiler actually emitted (SASS)
 
@@ -412,7 +411,15 @@ At N = 4096, `tc1` runs **{{tc_speedup:tc1_wmma_smem:tc0_wmma_naive:4096}} faste
 {{tc_pct:tc1_wmma_smem:4096}} of `cublasGemmEx`. `tc2` vs `tc1`:
 {{tc_speedup:tc2_wmma_db:tc1_wmma_smem:2048}} at N = 2048 ({{tc_pct:tc2_wmma_db:2048}} of
 `cublasGemmEx`), with the tensor pipe busy {{tcpipe:tc2_wmma_db}} of the time.
-<!-- FINALIZE AFTER FINAL RUN: interpret tc2 vs tc1 (did overlap pay for the shallower K tile?). -->
+**Double buffering only paid off at small sizes.**
+- At N = 512, tc2 beats tc1: {{tc_pct:tc2_wmma_db:512}} vs {{tc_pct:tc1_wmma_smem:512}} of
+  `cublasGemmEx`.
+- From N = 1024 up it's slower: {{tc_pct:tc2_wmma_db:2048}} vs {{tc_pct:tc1_wmma_smem:2048}} at
+  N = 2048. To fit two buffers and still keep 2 blocks per SM, tc2 halves the K tile. That
+  halves the MMAs between barriers and doubles the load rounds per unit of K, and once the grid
+  fills the GPU this costs more than the overlap saves.
+- Tensor pipe busy: {{tcpipe:tc2_wmma_db}} for tc2 vs {{tcpipe:tc1_wmma_smem}} for tc1. This is
+  another measured negative result, kept for the same reason as v5.
 
 - [`tc3_ptx_mma.cu`](src/kernels/tc3_ptx_mma.cu): the same tiling as tc2, written without WMMA.
   It uses the PTX instructions WMMA hides: `ldmatrix.sync…x4` (one instruction loads four 8×8

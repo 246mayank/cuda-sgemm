@@ -8,7 +8,7 @@ LDLIBS    := -lcublas
 KERNELS := $(wildcard src/kernels/*.cu)
 HEADERS := src/common.h src/kernels/kernels.h
 
-all: bench bandwidth
+all: bench bandwidth reduce
 
 # -Xptxas -v prints registers, spills and shared memory per kernel at compile time; the same
 # numbers are also written at run time to results/kernels_*.csv by bench.
@@ -19,6 +19,9 @@ bandwidth: src/bandwidth.cu src/common.h
 	$(NVCC) $(NVCCFLAGS) -arch=$(ARCH) -DARCH_STR='"$(ARCH)"' -o $@ src/bandwidth.cu
 
 clean:
-	rm -f bench bandwidth
+	rm -f bench bandwidth reduce
 
 .PHONY: all clean
+
+reduce: src/reduce.cu src/common.h
+	$(NVCC) $(NVCCFLAGS) -arch=$(ARCH) -DARCH_STR='"$(ARCH)"' -o $@ src/reduce.cu
