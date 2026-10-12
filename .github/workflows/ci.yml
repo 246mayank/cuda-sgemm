@@ -1,0 +1,30 @@
+# CI: the CPU test suite (index maps, bank-conflict model, PTX fragment layouts, split-K
+# slicing, report generation) and a compile check of all CUDA code. No GPU is needed for
+# either; kernels are run and timed on a T4 via notebooks/run_on_colab.ipynb.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q tests
+
+  cuda-build:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    strategy:
+      matrix:
+        arch: [sm_75, sm_80]   # T4 (where results come from), and Ampere to prove portability
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends make
+      - run: make ARCH=${{ matrix.arch }} -j2

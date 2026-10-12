@@ -1,5 +1,7 @@
 # cuda-sgemm
 
+![CI](https://github.com/246mayank/cuda-sgemm/actions/workflows/ci.yml/badge.svg)
+
 FP32 matrix multiply (SGEMM) in CUDA C++, optimised one idea at a time on an NVIDIA Tesla T4,
 with every kernel checked against cuBLAS, profiled with Nsight Compute, and every number in
 this README generated from the CSVs in [`results/`](results/).
@@ -62,6 +64,7 @@ python scripts/make_tables.py
 ```
 
 Anywhere with CUDA: `make` then `./bench` (or `./bench --tc`, `--tune`, `--shapes`, `./reduce`).
+Tests (no GPU needed; they replay every kernel's index math on the CPU): `python -m pytest tests`.
 
 ## Credits
 
