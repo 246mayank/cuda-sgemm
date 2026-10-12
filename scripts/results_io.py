@@ -18,7 +18,7 @@ FIGURES = ROOT / "figures"
 # adding a kernel later never repaints the existing ones.
 KERNEL_ORDER = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
                 "v4_2d_blocktiling", "v5_vectorized", "v6_double_buffered", "v7_conflict_free",
-                "v8_warptiling", "v9_autotuned", "v11_splitk"]
+                "v8_warptiling", "v9_autotuned", "v11_splitk", "v12_dispatch"]
 
 
 def parse_args(description):

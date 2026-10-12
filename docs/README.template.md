@@ -490,6 +490,23 @@ What doesn't:
 - Skinny M = 128: {{shape_pct:v11_splitk:128:4096:4096}} of cuBLAS (v9:
   {{shape_pct:v9_autotuned:128:4096:4096}}).
 
+### v12: one dispatcher for every shape ([`v12_dispatch.cu`](src/kernels/v12_dispatch.cu))
+
+v9 and v11 each win in a different regime, so v12 chooses between them with a two-line rule read
+off the measurements:
+- **split-K (v11)** when the 64×128 grid has fewer blocks than one wave ({{sm_count}} SMs × 4)
+  *and* the problem isn't tiny (cube root of M·N·K ≥ 768);
+- **v9's tuned tiles** otherwise.
+
+The rule was chosen from one run and measured in another session.
+
+| | N = 256 | N = 1024 | N = 4096 | 128 × 4096 × 4096 |
+|---|---|---|---|---|
+| v9 | {{pct:v9_autotuned:256}} | {{pct:v9_autotuned:1024}} | {{pct:v9_autotuned:4096}} | {{shape_pct:v9_autotuned:128:4096:4096}} |
+| v11 | {{pct:v11_splitk:256}} | {{pct:v11_splitk:1024}} | {{pct:v11_splitk:4096}} | {{shape_pct:v11_splitk:128:4096:4096}} |
+| **v12** | **{{pct:v12_dispatch:256}}** | **{{pct:v12_dispatch:1024}}** | **{{pct:v12_dispatch:4096}}** | **{{shape_pct:v12_dispatch:128:4096:4096}}** |
+<!-- FINALIZE AFTER V12 RUN: does v12 track the better of v9/v11 in the validation run? -->
+
 ### What still separates the best kernel from cuBLAS
 
 - **The clock.** The fastest single timed run of each kernel at N = 4096 is far above its

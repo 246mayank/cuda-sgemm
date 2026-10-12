@@ -26,7 +26,7 @@ from results_io import (FIGURES, KERNEL_ORDER, kernels_in, load_bandwidth, load_
 # need more hues than the palette has); every kernel is in the bar chart and the tables.
 SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 PLOTTED = ["v0_naive", "v1_coalesced", "v2_smem_tiling", "v3_1d_blocktiling",
-           "v4_2d_blocktiling", "v7_conflict_free", "v9_autotuned"]
+           "v4_2d_blocktiling", "v7_conflict_free", "v12_dispatch"]
 COLOR = dict(zip(PLOTTED, SLOTS))
 
 

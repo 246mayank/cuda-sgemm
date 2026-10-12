@@ -107,7 +107,7 @@ class Data:
 
     def ncu_key(self, k):
         """v9 has no kernel of its own: under ncu it runs as the config it dispatches to at NCU_N."""
-        if k == "v9_autotuned":
+        if k in ("v9_autotuned", "v12_dispatch"):  # at NCU_N the grid is full: v12 runs v9
             try:
                 return self.scalar("dispatch", [str(NCU_N)]).strip("`")
             except Missing:
@@ -696,10 +696,10 @@ class Data:
             cub = g[g.kernel == "cublas"]
             rows.append([f"{m} × {n} × {k}", f"{cub.gflops.iloc[0]:,.0f}" if not cub.empty else "",
                          cell("v4_2d_blocktiling"), cell("v7_conflict_free"), cell("v9_autotuned"),
-                         cell("v11_splitk")])
+                         cell("v11_splitk"), cell("v12_dispatch")])
         return (f"M × N × K (M = tokens; N, K = layer widths), cuBLAS GFLOP/s and each kernel's % of "
                 f"paired cuBLAS, from `results/{p.name}`:\n\n"
-                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11"], rows))
+                + md_table(["shape", "cuBLAS GFLOP/s", "v4", "v7", "v9", "v11", "v12"], rows))
 
     def t_locked(self):
         if self.locked is None:

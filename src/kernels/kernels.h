@@ -43,6 +43,8 @@ void launch_v9_autotuned(int M, int N, int K, const float* A, const float* B, fl
 KernelResources resources_v9_autotuned();
 void launch_v11_splitk(int M, int N, int K, const float* A, const float* B, float* C);
 KernelResources resources_v11_splitk();
+void launch_v12_dispatch(int M, int N, int K, const float* A, const float* B, float* C);
+KernelResources resources_v12_dispatch();
 
 // Tensor-core track (bench --tc): FP16 inputs, FP32 accumulation, WMMA. Sizes: multiples of 128.
 void launch_tc0_wmma_naive(int M, int N, int K, const half* A, const half* B, float* C);
