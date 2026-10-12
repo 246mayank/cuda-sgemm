@@ -327,12 +327,22 @@ Results for the 64×128 tile at N = 4096:
 | `v10_64x128x8_8x8_b2_s0` (= v7's best shape) | {{tune_res:v10_64x128x8_8x8_b2_s0:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b2_s0:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b2_s0:4096}} |
 | `v10_64x128x8_8x8_b4_s0` (128-register cap) | {{tune_res:v10_64x128x8_8x8_b4_s0:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b4_s0:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b4_s0:4096}} |
 | `v10_64x128x8_8x8_b2_s8` (swizzle only) | {{tune_res:v10_64x128x8_8x8_b2_s8:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b2_s8:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b2_s8:4096}} |
+| `v10_64x128x8_8x8_b4_s4` (cap + swizzle 4) | {{tune_res:v10_64x128x8_8x8_b4_s4:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b4_s4:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b4_s4:4096}} |
+| `v10_64x128x8_8x8_b4_s8` (cap + swizzle 8) | {{tune_res:v10_64x128x8_8x8_b4_s8:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b4_s8:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b4_s8:4096}} |
+| `v10_64x128x8_8x8_b4_s16` (cap + swizzle 16) | {{tune_res:v10_64x128x8_8x8_b4_s16:regs_per_thread}} | {{tune_res:v10_64x128x8_8x8_b4_s16:blocks_per_sm}} | {{tune_pct:v10_64x128x8_8x8_b4_s16:4096}} |
 
 - **Capping registers worked.** At 128 registers per thread the compiler still didn't spill
   ({{tune_res:v10_64x128x8_8x8_b4_s0:local_bytes_per_thread}} bytes of local memory), and a
   fourth block per SM gives more warps to hide shared-load and barrier latency.
-- **The swizzle is about neutral.** That's consistent with the roofline: these kernels sit far
-  to the right of the ridge, so L2 and DRAM traffic aren't what limits them.
+- **The swizzle results scatter in both directions** across group widths, by about as much as
+  the same configuration moves between tuning runs. Within this noise there's no reliable swizzle
+  effect. That's consistent with the roofline: these kernels sit far to the right of the ridge,
+  so L2 and DRAM traffic aren't what limits them.
+- **Pushing further spilled.** A 102-register cap (MINB = 5) and the 96×128 and 64×192 shapes
+  spill ({{tune_res:v10_64x128x8_8x8_b5_s0:local_bytes_per_thread}},
+  {{tune_res:v10_96x128x8_8x8_b3_s0:local_bytes_per_thread}} and
+  {{tune_res:v10_64x192x8_8x8_b3_s0:local_bytes_per_thread}} bytes per thread) and lose.
+<!-- FINALIZE AFTER FINAL RUN: re-check the swizzle scatter claim against the final tuning file. -->
 
 ### What the compiler actually emitted (SASS)
 
