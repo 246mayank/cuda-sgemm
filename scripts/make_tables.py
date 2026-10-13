@@ -326,6 +326,21 @@ class Data:
                 raise Missing(f"tctune at N={args[0]}")
             b = g.loc[g.pct_cublas.idxmax()]
             return f"`{b.kernel}`" if name == "tctune_best" else f"{b.pct_cublas:.1f}%"
+        if name in ("epi_lt_speedup", "epi_lt_best", "epi_lt_worst"):  # cuBLASLt fused epilogue
+            d, _ = self.epi()
+            if "lt_status" not in d.columns:
+                raise Missing("cuBLASLt columns in epi_*.csv")
+            d = d[d.lt_status == "PASS"]
+            if d.empty:
+                raise Missing("cuBLASLt PASS rows")
+            if name == "epi_lt_speedup":
+                r = d[(d.act == args[0]) & (d.M == int(args[1])) & (d.N == int(args[2]))
+                      & (d.K == int(args[3]))]
+                if r.empty:
+                    raise Missing(f"cuBLASLt epilogue {args}")
+                return f"{r.lt_speedup.iloc[0]:.2f}x"
+            b = d.loc[d.lt_speedup.idxmax() if name == "epi_lt_best" else d.lt_speedup.idxmin()]
+            return f"{b.lt_speedup:.2f}x ({b.act}, {b.M} × {b.N} × {b.K})"
         if name in ("epi_speedup", "epi_best", "epi_worst"):  # {{epi_speedup:ACT:M:N:K}}, {{epi_best}}
             d, _ = self.epi()
             d = d[d.status == "PASS"]
@@ -761,16 +776,28 @@ class Data:
 
     def t_epilogue(self):
         d, p = self.epi()
+        has_lt = "lt_status" in d.columns
         rows = []
         for _, r in d.iterrows():
             ok = r.status == "PASS"
-            rows.append([r.act, f"{r.M} × {r.N} × {r.K}", f"{r.unfused_median_ms:.3f}",
-                         f"{r.fused_median_ms:.3f}" if ok else "FAILED",
-                         f"{r.speedup:.2f}x" if ok else "", f"{r.max_rel_err:.1e}", r.status])
+            row = [r.act, f"{r.M} × {r.N} × {r.K}", f"{r.unfused_median_ms:.3f}",
+                   f"{r.fused_median_ms:.3f}" if ok else "FAILED",
+                   f"{r.speedup:.2f}x" if ok else "", f"{r.max_rel_err:.1e}", r.status]
+            if has_lt:
+                lok = r.lt_status == "PASS"
+                row += [f"{r.lt_median_ms:.3f}" if lok else r.lt_status,
+                        f"{r.lt_speedup:.2f}x" if lok else "", r.lt_status]
+            rows.append(row)
+        head = ["activation", "M × N × K", "unfused ms", "f1 fused ms", "f1 speedup",
+                "max rel err (f1 vs unfused)", "f1 check"]
+        if has_lt:
+            head += ["cuBLASLt fused ms", "cuBLASLt speedup", "cuBLASLt check"]
         return ("act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation "
-                f"kernel, fused = f1; median times timed interleaved, from `results/{p.name}`:\n\n"
-                + md_table(["activation", "M × N × K", "unfused ms", "fused ms", "speedup",
-                            "max rel err (fused vs unfused)", "check"], rows))
+                "kernel, f1 = this repo's fused kernel"
+                + (", cuBLASLt = one `cublasLtMatmul` with its built-in bias + activation epilogue"
+                   if has_lt else "")
+                + "; speedup = unfused time ÷ fused time; median times, timed interleaved, from "
+                f"`results/{p.name}`:\n\n" + md_table(head, rows))
 
     def t_shapes(self):
         p = newest("shapes_sgemm_*.csv")

@@ -787,9 +787,9 @@ small K, as in a transformer's FFN projections. `./bench --epilogue` compares it
 `cublasSgemm` plus a separate bias + activation kernel (ReLU and GELU), timed interleaved, and
 checks the fused result against the unfused one.
 
-act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation kernel, fused = f1; median times timed interleaved, from `results/epi_Tesla_T4_2026-10-13_001947.csv`:
+act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation kernel, f1 = this repo's fused kernel; speedup = unfused time ÷ fused time; median times, timed interleaved, from `results/epi_Tesla_T4_2026-10-13_001947.csv`:
 
-| activation | M × N × K | unfused ms | fused ms | speedup | max rel err (fused vs unfused) | check |
+| activation | M × N × K | unfused ms | f1 fused ms | f1 speedup | max rel err (f1 vs unfused) | f1 check |
 |---|---|---|---|---|---|---|
 | relu | 1024 × 1024 × 1024 | 0.539 | 0.655 | 0.82x | 1.2e-06 | PASS |
 | gelu | 1024 × 1024 × 1024 | 0.539 | 0.662 | 0.81x | 1.2e-06 | PASS |

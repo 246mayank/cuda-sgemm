@@ -3,7 +3,7 @@
 ARCH      ?= sm_75
 NVCC      ?= nvcc
 NVCCFLAGS ?= -O3 -std=c++17 -lineinfo
-LDLIBS    := -lcublas
+LDLIBS    := -lcublas -lcublasLt
 
 KERNELS := $(wildcard src/kernels/*.cu)
 HEADERS := src/common.h src/kernels/kernels.h

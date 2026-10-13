@@ -35,8 +35,9 @@
 //   --shapes        rectangular GEMMs of the kind found in transformer layers (M = tokens,
 //                   N/K = hidden or FFN width), for v4, v7, v9 vs cuBLAS; prefix "shapes_"
 //   --epilogue      fused-epilogue study: C = act(A*B + bias) (ReLU, GELU) with the f1 kernel vs
-//                   cublasSgemm followed by a separate bias+activation kernel, timed interleaved;
-//                   writes results/epi_<gpu>_<stamp>.csv
+//                   cublasSgemm followed by a separate bias+activation kernel, and vs cuBLASLt's own
+//                   fused epilogue (one cublasLtMatmul with CUBLASLT_EPILOGUE_RELU_BIAS /
+//                   GELU_BIAS), all three timed interleaved; writes results/epi_<gpu>_<stamp>.csv
 //   --prefix p_     prepend p_ to every output file name (e.g. locked900_ for a clock-locked
 //                   run), so special runs never mix with the headline results/sgemm_*.csv
 //
@@ -50,6 +51,8 @@
 
 #include "common.h"
 #include "kernels/kernels.h"
+
+#include <cublasLt.h>
 
 #include <cstring>
 #include <ctime>
@@ -131,11 +134,20 @@ int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int re
     struct EpiRow {
         const char* act;
         Shape s;
-        TimingStats u, f;
-        double err;
+        TimingStats u, f, l;
+        double err, lerr;
         const char* status;
+        const char* lstatus;  // PASS, FAILED, or UNSUPPORTED (no cuBLASLt algorithm found)
     };
     std::vector<EpiRow> rows;
+
+    // cuBLASLt: the same column-major view as cublasSgemm above (C^T = B^T A^T), with the bias
+    // added per row of the column-major D, i.e. per column of our row-major C.
+    cublasLtHandle_t lt;
+    CUBLAS_CHECK(cublasLtCreate(&lt));
+    const size_t ws_bytes = 32u << 20;
+    void* ws;
+    CUDA_CHECK(cudaMalloc(&ws, ws_bytes));
     for (const Shape& sh : shapes) {
         const int M = sh.M, N = sh.N, K = sh.K;
         const size_t nA = (size_t)M * K, nB = (size_t)K * N, nC = (size_t)M * N;
@@ -143,12 +155,14 @@ int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int re
         for (auto& x : hA) x = dist(rng);
         for (auto& x : hB) x = dist(rng);
         for (auto& x : hbias) x = dist(brng);
-        float *dA, *dB, *dbias, *dCu, *dCf;
+        std::vector<float> hl(nC);
+        float *dA, *dB, *dbias, *dCu, *dCf, *dCl;
         CUDA_CHECK(cudaMalloc(&dA, nA * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dB, nB * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dbias, N * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dCu, nC * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&dCf, nC * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&dCl, nC * sizeof(float)));
         CUDA_CHECK(cudaMemcpy(dA, hA.data(), nA * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB, hB.data(), nB * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dbias, hbias.data(), N * sizeof(float), cudaMemcpyHostToDevice));
@@ -163,14 +177,50 @@ int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int re
                 if (act == 1) launch_f1_bias_relu(M, N, K, dA, dB, dbias, dCf);
                 else launch_f1_bias_gelu(M, N, K, dA, dB, dbias, dCf);
             };
+            // cuBLASLt fused epilogue (vendor fusion). GELU_BIAS uses the tanh approximation,
+            // the same formula as bias_act and f1.
+            cublasLtMatmulDesc_t op;
+            cublasLtMatrixLayout_t la, lb, lc;
+            cublasLtMatmulPreference_t pref;
+            CUBLAS_CHECK(cublasLtMatmulDescCreate(&op, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+            const cublasLtEpilogue_t epi =
+                act == 1 ? CUBLASLT_EPILOGUE_RELU_BIAS : CUBLASLT_EPILOGUE_GELU_BIAS;
+            CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_EPILOGUE, &epi,
+                                                        sizeof(epi)));
+            CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                                        &dbias, sizeof(dbias)));
+            CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&la, CUDA_R_32F, N, K, N));  // B^T
+            CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lb, CUDA_R_32F, K, M, K));  // A^T
+            CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lc, CUDA_R_32F, N, M, N));  // C^T
+            CUBLAS_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+            CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(
+                pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes, sizeof(ws_bytes)));
+            cublasLtMatmulHeuristicResult_t heur = {};
+            int nres = 0;
+            const bool lt_ok = cublasLtMatmulAlgoGetHeuristic(lt, op, la, lb, lc, lc, pref, 1,
+                                                              &heur, &nres) ==
+                                   CUBLAS_STATUS_SUCCESS &&
+                               nres > 0;
+            auto ltfused = [&]() {
+                CUBLAS_CHECK(cublasLtMatmul(lt, op, &one, dB, la, dA, lb, &zero, dCl, lc, dCl,
+                                            lc, &heur.algo, ws, ws_bytes, 0));
+            };
+
             CUDA_CHECK(cudaMemset(dCf, 0xFF, nC * sizeof(float)));  // NaN: skipped writes fail
-            for (int i = 0; i < std::max(warmup, 1); ++i) { unfused(); fused(); }
+            CUDA_CHECK(cudaMemset(dCl, 0xFF, nC * sizeof(float)));
+            for (int i = 0; i < std::max(warmup, 1); ++i) {
+                unfused();
+                fused();
+                if (lt_ok) ltfused();
+            }
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
             CUDA_CHECK(cudaMemcpy(hu.data(), dCu, nC * sizeof(float), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hf.data(), dCf, nC * sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hl.data(), dCl, nC * sizeof(float), cudaMemcpyDeviceToHost));
             const double err = max_rel_err(hf.data(), hu.data(), nC);
-            std::vector<float> tu(reps), tf(reps);
+            const double lerr = lt_ok ? max_rel_err(hl.data(), hu.data(), nC) : NAN;
+            std::vector<float> tu(reps), tf(reps), tl(reps, NAN);
             for (int r = 0; r < reps; ++r) {  // interleaved, like the paired cuBLAS timing
                 timer.start();
                 unfused();
@@ -178,34 +228,57 @@ int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int re
                 timer.start();
                 fused();
                 tf[r] = timer.stop_ms();
+                if (lt_ok) {
+                    timer.start();
+                    ltfused();
+                    tl[r] = timer.stop_ms();
+                }
             }
             CUDA_CHECK(cudaGetLastError());
-            rows.push_back({act == 1 ? "relu" : "gelu", sh, summarize(tu), summarize(tf), err,
-                            err <= tol ? "PASS" : "FAILED"});
+            CUBLAS_CHECK(cublasLtMatmulPreferenceDestroy(pref));
+            CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(la));
+            CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(lb));
+            CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(lc));
+            CUBLAS_CHECK(cublasLtMatmulDescDestroy(op));
+            const TimingStats ls = lt_ok ? summarize(tl) : TimingStats{NAN, NAN, NAN};
+            rows.push_back({act == 1 ? "relu" : "gelu", sh, summarize(tu), summarize(tf), ls, err,
+                            lerr, err <= tol ? "PASS" : "FAILED",
+                            !lt_ok ? "UNSUPPORTED" : (lerr <= tol ? "PASS" : "FAILED")});
         }
         CUDA_CHECK(cudaFree(dA));
         CUDA_CHECK(cudaFree(dB));
         CUDA_CHECK(cudaFree(dbias));
         CUDA_CHECK(cudaFree(dCu));
         CUDA_CHECK(cudaFree(dCf));
+        CUDA_CHECK(cudaFree(dCl));
     }
+    CUDA_CHECK(cudaFree(ws));
+    CUBLAS_CHECK(cublasLtDestroy(lt));
 
-    std::printf("\n%-5s %5s %5s %5s %12s %12s %8s %10s %s\n", "act", "M", "N", "K",
-                "unfused_ms", "fused_ms", "speedup", "rel_err", "status");
+    std::printf("\n%-5s %5s %5s %5s %12s %12s %8s %10s %-7s %12s %8s %10s %s\n", "act", "M", "N",
+                "K", "unfused_ms", "fused_ms", "speedup", "rel_err", "status", "cublasLt_ms",
+                "lt_spd", "lt_err", "lt_status");
     for (auto& r : rows)
-        std::printf("%-5s %5d %5d %5d %12.4f %12.4f %8.3f %10.2e %s\n", r.act, r.s.M, r.s.N, r.s.K,
-                    r.u.median_ms, r.f.median_ms, r.u.median_ms / r.f.median_ms, r.err, r.status);
+        std::printf("%-5s %5d %5d %5d %12.4f %12.4f %8.3f %10.2e %-7s %12.4f %8.3f %10.2e %s\n",
+                    r.act, r.s.M, r.s.N, r.s.K, r.u.median_ms, r.f.median_ms,
+                    r.u.median_ms / r.f.median_ms, r.err, r.status, r.l.median_ms,
+                    r.u.median_ms / r.l.median_ms, r.lerr, r.lstatus);
     if (!write) return 0;
 
     const std::string path = "results/" + prefix + "epi_" + env.gpu_tag + "_" + env.stamp + ".csv";
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) { std::fprintf(stderr, "cannot open %s (run from the repo root)\n", path.c_str()); return 1; }
     std::fprintf(f, "act,M,N,K,unfused_median_ms,unfused_min_ms,unfused_p90_ms,fused_median_ms,"
-                    "fused_min_ms,fused_p90_ms,speedup,max_rel_err,status\n");
+                    "fused_min_ms,fused_p90_ms,speedup,max_rel_err,status,lt_median_ms,lt_min_ms,"
+                    "lt_p90_ms,lt_speedup,lt_max_rel_err,lt_status\n");
     for (auto& r : rows)
-        std::fprintf(f, "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.3e,%s\n", r.act, r.s.M,
-                     r.s.N, r.s.K, r.u.median_ms, r.u.min_ms, r.u.p90_ms, r.f.median_ms, r.f.min_ms,
-                     r.f.p90_ms, r.u.median_ms / r.f.median_ms, r.err, r.status);
+        std::fprintf(f,
+                     "%s,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.3e,%s,%.6f,%.6f,%.6f,%.4f,"
+                     "%.3e,%s\n",
+                     r.act, r.s.M, r.s.N, r.s.K, r.u.median_ms, r.u.min_ms, r.u.p90_ms,
+                     r.f.median_ms, r.f.min_ms, r.f.p90_ms, r.u.median_ms / r.f.median_ms, r.err,
+                     r.status, r.l.median_ms, r.l.min_ms, r.l.p90_ms,
+                     r.u.median_ms / r.l.median_ms, r.lerr, r.lstatus);
     std::fclose(f);
     const std::string env_path =
         "results/" + prefix + "epi_env_" + env.gpu_tag + "_" + env.stamp + ".json";
@@ -215,7 +288,9 @@ int run_epilogue(const DeviceEnv& env, cublasHandle_t handle, int warmup, int re
         write_env_fields(f, env);
         std::fprintf(f, "  \"warmup_runs\": %d,\n  \"timed_runs\": %d,\n", warmup, reps);
         std::fprintf(f, "  \"tolerance_max_rel_err\": %g,\n", tol);
-        std::fprintf(f, "  \"unfused\": \"cublasSgemm + bias_act kernel\"\n}\n");
+        std::fprintf(f, "  \"unfused\": \"cublasSgemm + bias_act kernel\",\n");
+        std::fprintf(f, "  \"cublaslt\": \"cublasLtMatmul, CUBLASLT_EPILOGUE_RELU_BIAS / GELU_BIAS, "
+                        "top heuristic algorithm, %zu MiB workspace\"\n}\n", ws_bytes >> 20);
         std::fclose(f);
     }
     std::printf("wrote %s\n", path.c_str());
