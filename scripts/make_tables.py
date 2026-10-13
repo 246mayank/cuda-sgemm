@@ -326,13 +326,18 @@ class Data:
                 raise Missing(f"tctune at N={args[0]}")
             b = g.loc[g.pct_cublas.idxmax()]
             return f"`{b.kernel}`" if name == "tctune_best" else f"{b.pct_cublas:.1f}%"
-        if name in ("epi_speedup", "epi_best"):  # {{epi_speedup:ACT:M:N:K}}, {{epi_best}}
+        if name in ("epi_speedup", "epi_best", "epi_worst"):  # {{epi_speedup:ACT:M:N:K}}, {{epi_best}}
             d, _ = self.epi()
             d = d[d.status == "PASS"]
             if name == "epi_best":
                 if d.empty:
                     raise Missing("epilogue PASS rows")
                 b = d.loc[d.speedup.idxmax()]
+                return f"{b.speedup:.2f}x ({b.act}, {b.M} × {b.N} × {b.K})"
+            if name == "epi_worst":
+                if d.empty:
+                    raise Missing("epilogue PASS rows")
+                b = d.loc[d.speedup.idxmin()]
                 return f"{b.speedup:.2f}x ({b.act}, {b.M} × {b.N} × {b.K})"
             r = d[(d.act == args[0]) & (d.M == int(args[1])) & (d.N == int(args[2]))
                   & (d.K == int(args[3]))]

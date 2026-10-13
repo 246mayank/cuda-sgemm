@@ -787,9 +787,43 @@ small K, as in a transformer's FFN projections. `./bench --epilogue` compares it
 `cublasSgemm` plus a separate bias + activation kernel (ReLU and GELU), timed interleaved, and
 checks the fused result against the unfused one.
 
-n/a
+act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation kernel, fused = f1; median times timed interleaved, from `results/epi_Tesla_T4_2026-10-13_001947.csv`:
 
-Best measured speedup: n/a.
+| activation | M × N × K | unfused ms | fused ms | speedup | max rel err (fused vs unfused) | check |
+|---|---|---|---|---|---|---|
+| relu | 1024 × 1024 × 1024 | 0.539 | 0.655 | 0.82x | 1.2e-06 | PASS |
+| gelu | 1024 × 1024 × 1024 | 0.539 | 0.662 | 0.81x | 1.2e-06 | PASS |
+| relu | 2048 × 2048 × 2048 | 3.823 | 4.159 | 0.92x | 1.9e-06 | PASS |
+| gelu | 2048 × 2048 × 2048 | 3.849 | 4.206 | 0.92x | 1.9e-06 | PASS |
+| relu | 4096 × 4096 × 4096 | 33.065 | 35.836 | 0.92x | 0.0e+00 | PASS |
+| gelu | 4096 × 4096 × 4096 | 33.154 | 36.053 | 0.92x | 0.0e+00 | PASS |
+| relu | 2048 × 3072 × 768 | 1.659 | 1.743 | 0.95x | 1.3e-06 | PASS |
+| gelu | 2048 × 3072 × 768 | 1.913 | 1.996 | 0.96x | 1.3e-06 | PASS |
+| relu | 2048 × 768 × 3072 | 1.886 | 2.076 | 0.91x | 2.9e-06 | PASS |
+| gelu | 2048 × 768 × 3072 | 2.073 | 2.353 | 0.88x | 2.9e-06 | PASS |
+
+**Result: fusion did not pay off against cuBLAS on the T4.** Speedup is unfused time ÷ fused
+time, so values below 1 mean the fused kernel is slower. Every row is below 1, from 0.81x (gelu, 1024 × 1024 × 1024)
+to 0.96x (gelu, 2048 × 3072 × 768). The comparison is not "fused vs unfused" with the same GEMM. The unfused GEMM is
+cuBLAS. The fused one is v14's `64x128x8_8x8_b4_s0` configuration, which averages
+80.3%, 89.2% and
+91.2% of cuBLAS at N = 1024, 2048 and 4096 in the tuning runs.
+The fused kernel therefore starts that far behind. Removing the bias + activation pass saves
+only a fraction of the GEMM time, and the GEMM gap is larger than that saving.
+
+The shape dependence matches the model above. The saving is a fixed cost per element of C, so it
+should matter most when K is small relative to the output:
+- 2048 × 3072 × 768 (FFN up-projection, large C, small K) is the best case:
+  0.96x (GELU).
+- 2048 × 768 × 3072 (same FLOPs, C four times smaller, K four times larger) is
+  0.88x.
+- At N = 1024, where this configuration is weakest, the ratio is the lowest:
+  0.81x.
+
+**Takeaway:** fusion is worth it only on top of a GEMM that is already at cuBLAS speed. That is
+why production code fuses through the vendor library's own epilogues: cuBLASLt epilogues, or
+CUTLASS epilogue visitors. That variant (`cublasLtMatmul` with `CUBLASLT_EPILOGUE_GELU_BIAS`) was
+not measured here.
 
 ## Side study: parallel reduction
 
@@ -956,6 +990,7 @@ Source files for every number above:
 - `results/model_bank_conflicts.csv`
 - `results/reduce_Tesla_T4_2026-10-12_174326.csv`
 - `results/shapes_sgemm_Tesla_T4_2026-10-12_174300.csv`
+- `results/epi_Tesla_T4_2026-10-13_001947.csv`
 
 ## Reproduce
 

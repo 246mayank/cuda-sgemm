@@ -601,7 +601,28 @@ checks the fused result against the unfused one.
 
 {{table:epilogue}}
 
-Best measured speedup: {{epi_best}}.
+**Result: fusion did not pay off against cuBLAS on the T4.** Speedup is unfused time ÷ fused
+time, so values below 1 mean the fused kernel is slower. Every row is below 1, from {{epi_worst}}
+to {{epi_best}}. The comparison is not "fused vs unfused" with the same GEMM. The unfused GEMM is
+cuBLAS. The fused one is v14's `64x128x8_8x8_b4_s0` configuration, which averages
+{{tune_mean:v14_64x128x8_8x8_b4_s0:1024}}, {{tune_mean:v14_64x128x8_8x8_b4_s0:2048}} and
+{{tune_mean:v14_64x128x8_8x8_b4_s0:4096}} of cuBLAS at N = 1024, 2048 and 4096 in the tuning runs.
+The fused kernel therefore starts that far behind. Removing the bias + activation pass saves
+only a fraction of the GEMM time, and the GEMM gap is larger than that saving.
+
+The shape dependence matches the model above. The saving is a fixed cost per element of C, so it
+should matter most when K is small relative to the output:
+- 2048 × 3072 × 768 (FFN up-projection, large C, small K) is the best case:
+  {{epi_speedup:gelu:2048:3072:768}} (GELU).
+- 2048 × 768 × 3072 (same FLOPs, C four times smaller, K four times larger) is
+  {{epi_speedup:gelu:2048:768:3072}}.
+- At N = 1024, where this configuration is weakest, the ratio is the lowest:
+  {{epi_speedup:gelu:1024:1024:1024}}.
+
+**Takeaway:** fusion is worth it only on top of a GEMM that is already at cuBLAS speed. That is
+why production code fuses through the vendor library's own epilogues: cuBLASLt epilogues, or
+CUTLASS epilogue visitors. That variant (`cublasLtMatmul` with `CUBLASLT_EPILOGUE_GELU_BIAS`) was
+not measured here.
 
 ## Side study: parallel reduction
 
