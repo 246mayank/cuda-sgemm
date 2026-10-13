@@ -47,9 +47,11 @@ v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size a
 - **Tensor cores (FP16 in, FP32 accumulate):** {{tc_best_tflops:2048}} TFLOP/s with
   {{tc_best:2048}}, {{tc_best_pct:2048}} of `cublasGemmEx`.
   A tile sweep (tc5) reaches {{tctune_best_pct:4096}} of `cublasGemmEx` at N = 4096.
-- **Fused epilogue (GEMM + bias + GELU/ReLU), a measured negative result:** fusing into the v14
-  GEMM reaches {{epi_worst}} to {{epi_best}} the speed of cuBLAS followed by a separate
-  kernel. The saved pass over C is smaller than v14's remaining gap to cuBLAS.
+- **Fused epilogue (GEMM + bias + GELU/ReLU), a measured negative result:** the separate
+  bias + activation pass is only {{epi_pass_pct:4096:4096:4096}}–{{epi_pass_pct:2048:3072:768}} of
+  the time (modelled), so fusing it gains nothing in FP32 on a T4. This repo's fused kernel runs at
+  {{epi_worst}} to {{epi_best}} of the unfused speed; cuBLASLt's own fused epilogue runs at
+  {{epi_lt_worst}} to {{epi_lt_best}}.
 - **Parallel reduction study:** r0 → r5 reaches {{red_gbps:r5_grid_stride}} GB/s,
   {{red_pct_cub:r5_grid_stride}} of CUB.
 - **Roofline, tuning sweep, real-world shapes, SASS analysis, methodology:** see the

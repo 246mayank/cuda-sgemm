@@ -326,6 +326,16 @@ class Data:
                 raise Missing(f"tctune at N={args[0]}")
             b = g.loc[g.pct_cublas.idxmax()]
             return f"`{b.kernel}`" if name == "tctune_best" else f"{b.pct_cublas:.1f}%"
+        if name == "epi_pass_pct":  # {{epi_pass_pct:M:N:K}}: modelled cost of the separate pass
+            # bias+act reads and writes C once: 8*M*N bytes at the measured copy bandwidth, as a
+            # share of the unfused (GELU) median time. Modelled, not measured.
+            d, _ = self.epi()
+            m, n, k = (int(a) for a in args)
+            r = d[(d.act == "gelu") & (d.M == m) & (d.N == n) & (d.K == k)]
+            if r.empty:
+                raise Missing(f"epilogue {args}")
+            pass_ms = 8.0 * m * n / (self.bw_best()[0] * 1e6)
+            return f"{100 * pass_ms / r.unfused_median_ms.iloc[0]:.1f}%"
         if name in ("epi_lt_speedup", "epi_lt_best", "epi_lt_worst"):  # cuBLASLt fused epilogue
             d, _ = self.epi()
             if "lt_status" not in d.columns:

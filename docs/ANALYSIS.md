@@ -787,43 +787,53 @@ small K, as in a transformer's FFN projections. `./bench --epilogue` compares it
 `cublasSgemm` plus a separate bias + activation kernel (ReLU and GELU), timed interleaved, and
 checks the fused result against the unfused one.
 
-act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation kernel, f1 = this repo's fused kernel; speedup = unfused time ÷ fused time; median times, timed interleaved, from `results/epi_Tesla_T4_2026-10-13_001947.csv`:
+act(A·B + bias), unfused = `cublasSgemm` followed by a separate bias + activation kernel, f1 = this repo's fused kernel, cuBLASLt = one `cublasLtMatmul` with its built-in bias + activation epilogue; speedup = unfused time ÷ fused time; median times, timed interleaved, from `results/epi_Tesla_T4_2026-10-13_005230.csv`:
 
-| activation | M × N × K | unfused ms | f1 fused ms | f1 speedup | max rel err (f1 vs unfused) | f1 check |
-|---|---|---|---|---|---|---|
-| relu | 1024 × 1024 × 1024 | 0.539 | 0.655 | 0.82x | 1.2e-06 | PASS |
-| gelu | 1024 × 1024 × 1024 | 0.539 | 0.662 | 0.81x | 1.2e-06 | PASS |
-| relu | 2048 × 2048 × 2048 | 3.823 | 4.159 | 0.92x | 1.9e-06 | PASS |
-| gelu | 2048 × 2048 × 2048 | 3.849 | 4.206 | 0.92x | 1.9e-06 | PASS |
-| relu | 4096 × 4096 × 4096 | 33.065 | 35.836 | 0.92x | 0.0e+00 | PASS |
-| gelu | 4096 × 4096 × 4096 | 33.154 | 36.053 | 0.92x | 0.0e+00 | PASS |
-| relu | 2048 × 3072 × 768 | 1.659 | 1.743 | 0.95x | 1.3e-06 | PASS |
-| gelu | 2048 × 3072 × 768 | 1.913 | 1.996 | 0.96x | 1.3e-06 | PASS |
-| relu | 2048 × 768 × 3072 | 1.886 | 2.076 | 0.91x | 2.9e-06 | PASS |
-| gelu | 2048 × 768 × 3072 | 2.073 | 2.353 | 0.88x | 2.9e-06 | PASS |
+| activation | M × N × K | unfused ms | f1 fused ms | f1 speedup | max rel err (f1 vs unfused) | f1 check | cuBLASLt fused ms | cuBLASLt speedup | cuBLASLt check |
+|---|---|---|---|---|---|---|---|---|---|
+| relu | 1024 × 1024 × 1024 | 0.817 | 1.027 | 0.80x | 1.2e-06 | PASS | 0.836 | 0.98x | PASS |
+| gelu | 1024 × 1024 × 1024 | 0.813 | 1.036 | 0.78x | 1.2e-06 | PASS | 0.810 | 1.00x | PASS |
+| relu | 2048 × 2048 × 2048 | 3.960 | 4.324 | 0.92x | 1.9e-06 | PASS | 4.068 | 0.97x | PASS |
+| gelu | 2048 × 2048 × 2048 | 4.024 | 4.416 | 0.91x | 1.9e-06 | PASS | 4.024 | 1.00x | PASS |
+| relu | 4096 × 4096 × 4096 | 32.925 | 35.359 | 0.93x | 0.0e+00 | PASS | 33.910 | 0.97x | PASS |
+| gelu | 4096 × 4096 × 4096 | 32.336 | 35.908 | 0.90x | 0.0e+00 | PASS | 33.604 | 0.96x | PASS |
+| relu | 2048 × 3072 × 768 | 2.429 | 2.468 | 0.98x | 1.3e-06 | PASS | 2.607 | 0.93x | PASS |
+| gelu | 2048 × 3072 × 768 | 2.315 | 2.366 | 0.98x | 1.3e-06 | PASS | 2.334 | 0.99x | PASS |
+| relu | 2048 × 768 × 3072 | 2.192 | 2.519 | 0.87x | 2.9e-06 | PASS | 2.226 | 0.98x | PASS |
+| gelu | 2048 × 768 × 3072 | 2.124 | 2.374 | 0.89x | 2.9e-06 | PASS | 2.123 | 1.00x | PASS |
 
-**Result: fusion did not pay off against cuBLAS on the T4.** Speedup is unfused time ÷ fused
-time, so values below 1 mean the fused kernel is slower. Every row is below 1, from 0.81x (gelu, 1024 × 1024 × 1024)
-to 0.96x (gelu, 2048 × 3072 × 768). The comparison is not "fused vs unfused" with the same GEMM. The unfused GEMM is
-cuBLAS. The fused one is v14's `64x128x8_8x8_b4_s0` configuration, which averages
-80.3%, 89.2% and
-91.2% of cuBLAS at N = 1024, 2048 and 4096 in the tuning runs.
-The fused kernel therefore starts that far behind. Removing the bias + activation pass saves
-only a fraction of the GEMM time, and the GEMM gap is larger than that saving.
+**Result: fusion did not pay off on the T4 in FP32, not even NVIDIA's own.** Speedup is unfused
+time ÷ fused time, so values below 1 mean the fused version is slower. Every row passes the check.
+- **f1 (this repo):** 0.78x (gelu, 1024 × 1024 × 1024) to 0.98x (relu, 2048 × 3072 × 768).
+- **cuBLASLt's built-in epilogue:** 0.93x (relu, 2048 × 3072 × 768) to 1.00x (gelu, 1024 × 1024 × 1024). This is the vendor library
+  fusing bias + activation into its own GEMM: essentially no gain.
 
-The shape dependence matches the model above. The saving is a fixed cost per element of C, so it
-should matter most when K is small relative to the output:
-- 2048 × 3072 × 768 (FFN up-projection, large C, small K) is the best case:
-  0.96x (GELU).
-- 2048 × 768 × 3072 (same FLOPs, C four times smaller, K four times larger) is
-  0.88x.
-- At N = 1024, where this configuration is weakest, the ratio is the lowest:
-  0.81x.
+**Why: the pass being removed is cheap here.** The separate kernel reads and writes C once, 8·M·N
+bytes. At the measured 236 GB/s copy bandwidth, that is a modelled (not measured) share of the
+unfused time of:
+- 1.8% at 4096³;
+- 4.4% at 1024³;
+- 9.2% for the 2048 × 3072 × 768 FFN projection (small K, large C), the
+  shape where fusion has the most to win.
 
-**Takeaway:** fusion is worth it only on top of a GEMM that is already at cuBLAS speed. That is
-why production code fuses through the vendor library's own epilogues: cuBLASLt epilogues, or
-CUTLASS epilogue visitors. That variant (`cublasLtMatmul` with `CUBLASLT_EPILOGUE_GELU_BIAS`) was
-not measured here.
+FP32 GEMM on a T4 is compute-heavy enough that one extra streaming pass over C hardly matters.
+Within that small margin, the GEMM inside the fused path decides the result:
+- f1 is v14's `64x128x8_8x8_b4_s0` configuration, which averages
+  80.3%, 89.2% and
+  91.2% of cuBLAS at N = 1024, 2048 and 4096. It loses where
+  that gap is largest: 0.78x (GELU) at 1024³.
+- f1 comes closest where the saved pass is largest: 0.98x on the FFN
+  projection. The same FLOPs with C four times smaller (2048 × 768 × 3072) give
+  0.89x.
+- cuBLASLt fuses into NVIDIA's own GEMM, so it isolates the fusion itself. It stays within a few
+  percent of 1.0, never above the modelled saving. Its algorithm is chosen by the cuBLASLt
+  heuristic, not necessarily the one `cublasSgemm` picks, which may explain the
+  0.93x (ReLU) on the FFN shape. That cause was not profiled.
+
+**Takeaway:** epilogue fusion pays when the removed pass is a large share of the time. That means
+low-precision tensor-core GEMMs, where the math is many times faster and the C traffic dominates,
+or memory-bound shapes. It does not pay for FP32 GEMMs of these sizes on a T4. Measuring before
+fusing showed it: both the hand-written and the vendor fusion are consistent with the model.
 
 ## Side study: parallel reduction
 
@@ -990,7 +1000,7 @@ Source files for every number above:
 - `results/model_bank_conflicts.csv`
 - `results/reduce_Tesla_T4_2026-10-12_174326.csv`
 - `results/shapes_sgemm_Tesla_T4_2026-10-12_174300.csv`
-- `results/epi_Tesla_T4_2026-10-13_001947.csv`
+- `results/epi_Tesla_T4_2026-10-13_005230.csv`
 
 ## Reproduce
 
