@@ -350,6 +350,37 @@ Results for the 64×128 tile at N = 4096:
   {{tune_res:v10_96x128x8_8x8_b3_s0:local_bytes_per_thread}} and
   {{tune_res:v10_64x192x8_8x8_b3_s0:local_bytes_per_thread}} bytes per thread) and lose.
 
+### v13 and v14: Boehm's last two ideas, on top of the occupancy finding
+
+Two techniques from the end of Simon Boehm's worklog were added as further knobs in the same
+tuning study. Each is generated from an earlier kernel, so only one idea changes.
+- **v13, warp tiling with the occupancy knob**
+  ([`v13_warptile_occ.cu`](../src/kernels/v13_warptile_occ.cu)): v8's warp-tiled kernel with
+  `MINB` as a template parameter, on the 64×128 and 128×64 blocks that won the v10 sweep. Warp
+  tiling was Boehm's largest late gain (his kernel 10). v8 had tried it only with 128×128 blocks
+  at 2 blocks per SM.
+- **v14, register prefetch** ([`v14_prefetch.cu`](../src/kernels/v14_prefetch.cu)): v10 with the
+  shared→register fragments double-buffered. While the FMAs for step k run, the A and B values
+  for step k+1 are already being loaded. This is the "prefetch the innermost dimension" that
+  Boehm lists as remaining work. It costs 16 more registers per thread.
+
+Averages over every tuning run that measured them (the same average the dispatch uses):
+
+| config | N = 1024 | N = 2048 | N = 4096 | runs |
+|---|---|---|---|---|
+| `v10_64x128x8_8x8_b4_s0` (no prefetch) | {{tune_mean:v10_64x128x8_8x8_b4_s0:1024}} | {{tune_mean:v10_64x128x8_8x8_b4_s0:2048}} | {{tune_mean:v10_64x128x8_8x8_b4_s0:4096}} | {{tune_runs:v10_64x128x8_8x8_b4_s0:4096}} |
+| `v14_64x128x8_8x8_b4_s0` (prefetch) | {{tune_mean:v14_64x128x8_8x8_b4_s0:1024}} | {{tune_mean:v14_64x128x8_8x8_b4_s0:2048}} | **{{tune_mean:v14_64x128x8_8x8_b4_s0:4096}}** | {{tune_runs:v14_64x128x8_8x8_b4_s0:4096}} |
+| `v14_64x128x8_8x8_b3_s0` (prefetch, 3 blocks/SM) | {{tune_mean:v14_64x128x8_8x8_b3_s0:1024}} | **{{tune_mean:v14_64x128x8_8x8_b3_s0:2048}}** | {{tune_mean:v14_64x128x8_8x8_b3_s0:4096}} | {{tune_runs:v14_64x128x8_8x8_b3_s0:4096}} |
+| `v13_64x128x8_w32x64_2x2_b2` (warp tiling) | **{{tune_mean:v13_64x128x8_w32x64_2x2_b2:1024}}** | {{tune_mean:v13_64x128x8_w32x64_2x2_b2:2048}} | {{tune_mean:v13_64x128x8_w32x64_2x2_b2:4096}} | {{tune_runs:v13_64x128x8_w32x64_2x2_b2:4096}} |
+
+- **Prefetch wins at the large sizes.** With the 128-register cap, the extra registers still
+  fit without spilling
+  ({{tune_res:v14_64x128x8_8x8_b4_s0:local_bytes_per_thread}} bytes of local memory), so the
+  overlap of shared loads with FMAs is close to free.
+- **Warp tiling wins at N = 1024.** With the right block shape it finally pays off on the T4.
+- The robust dispatch table ({{dispatch_source}}) uses v14 for the large sizes and v13 at 1024.
+  That's how the final kernel reaches the headline number.
+
 ### What the compiler actually emitted (SASS)
 
 "The compiler already vectorised v4's shared loads" is checked in the machine code: `cuobjdump
@@ -475,6 +506,14 @@ The counters (N = 2048) show it's the same reuse story as v1 → v2, now on tens
   relative error at N = 2048. That's acceptable for many workloads, but not interchangeable with
   SGEMM.
 
+**Tensor-core tile sweep (tc5).** [`tc5_wmma_tuned.cu`](../src/kernels/tc5_wmma_tuned.cu) is tc1
+as a template over block and warp tiles and `MINB`, swept like v10:
+
+{{table:tctune}}
+
+The best configuration at N = 4096 is {{tctune_best:4096}}, at {{tctune_best_pct:4096}} of
+`cublasGemmEx` in that run.
+
 ### Real-world shapes
 
 Square matrices are the textbook case. Transformer layers multiply rectangles: M = tokens, and
@@ -522,6 +561,21 @@ square sizes and on the skinny shape. On the smallest transformer shapes, v12 an
 identical kernel yet differ by more than that from session to session, so those rows measure
 noise as much as dispatch. Known miss: on 512 × 4096 × 4096 the rule picks v9, while v11
 measures better ({{shape_pct:v11_splitk:512:4096:4096}} vs {{shape_pct:v12_dispatch:512:4096:4096}}).
+
+### v15: deterministic split-K ([`v15_splitk_det.cu`](../src/kernels/v15_splitk_det.cu))
+
+v11 combines its K slices with `atomicAdd`, so the order of the additions, and the last bits of
+the result, change from run to run. v15 instead writes each slice to its own workspace slab and
+sums the slabs in a fixed order with a second small kernel. The result is **bit-reproducible**.
+The cost is one extra pass over M·N·(slices) floats:
+
+| | N = 1024 | 128 × 4096 × 4096 | 512 × 4096 × 4096 |
+|---|---|---|---|
+| v11 (atomics) | {{pct:v11_splitk:1024}} | {{shape_pct:v11_splitk:128:4096:4096}} | {{shape_pct:v11_splitk:512:4096:4096}} |
+| v15 (deterministic) | {{pct:v15_splitk_det:1024}} | {{shape_pct:v15_splitk_det:128:4096:4096}} | {{shape_pct:v15_splitk_det:512:4096:4096}} |
+
+When reproducibility matters (debugging, regression tests, numerically sensitive training),
+v15 gives it at the price shown.
 
 ### What still separates the best kernel from cuBLAS
 

@@ -395,12 +395,24 @@ class Data:
             if "duration" in args[0]:
                 return f"{v / 1e6:.1f} ms"
             return f"{v / 1e6:,.1f} M"
+        if name in ("tune_mean", "tune_runs"):  # {{tune_mean:CONFIG:N}} mean over ALL tuning runs
+            vals = []
+            for p in sorted(RESULTS.glob("tune_sgemm_*.csv")):
+                d = pd.read_csv(p)
+                r = d[(d.kernel == args[0]) & (d.M == int(args[1])) & (d.status == "PASS")]
+                if not r.empty:
+                    vals.append(float(r.pct_cublas.iloc[0]))
+            if not vals:
+                raise Missing(f"tuning runs for {args[0]} at N={args[1]}")
+            return f"{sum(vals) / len(vals):.1f}%" if name == "tune_mean" else str(len(vals))
         if name == "dispatch_source":  # which tuning CSV v9's table was generated from
             inc = ROOT / "src" / "kernels" / "v9_dispatch_table.inc"
-            m = re.search(r"results/(\S+\.csv)", inc.read_text(encoding="utf-8")) if inc.exists() else None
-            if not m:
+            files = re.findall(r"results/(\S+?\.csv)", inc.read_text(encoding="utf-8")) if inc.exists() else []
+            if not files:
                 raise Missing("v9_dispatch_table.inc")
-            return f"`results/{m.group(1)}`"
+            if len(files) == 1:
+                return f"`results/{files[0]}`"
+            return f"averaged over {len(files)} tuning runs, `results/tune_sgemm_*.csv`"
         if name in ("tcpipe", "tcdram_mb"):  # tensor-core ncu counters at N = 2048
             kind = "tcpipe" if name == "tcpipe" else "tcdram"
             t, _ = load_ncu(kind)

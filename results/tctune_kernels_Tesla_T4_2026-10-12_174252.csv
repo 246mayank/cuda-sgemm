@@ -1,0 +1,9 @@
+kernel,regs_per_thread,local_bytes_per_thread,static_smem_bytes,threads_per_block,blocks_per_sm,warps_per_sm,max_warps_per_sm,theoretical_occupancy_pct
+tc5_128x128x32_w2x4_b2,128,0,18944,256,2,16,32,50.0
+tc5_128x128x32_w2x2_b2,205,0,18944,128,2,8,32,25.0
+tc5_128x256x32_w2x4_b1,207,0,27136,256,1,8,32,25.0
+tc5_256x128x32_w4x2_b1,207,0,29184,256,1,8,32,25.0
+tc5_128x128x64_w2x4_b1,166,0,35840,256,1,8,32,25.0
+tc5_64x128x32_w2x2_b4,128,8,13824,128,4,16,32,50.0
+tc5_128x64x32_w2x2_b4,128,0,14848,128,4,16,32,50.0
+tc5_64x64x32_w2x2_b6,80,0,9728,128,6,24,32,75.0

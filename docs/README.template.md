@@ -31,8 +31,9 @@ v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size a
   {{conflicts_per_lds:v6_double_buffered}} conflicts per shared load in v4–v6. A new thread
   layout (v7) removed them: {{pspeedup:v7_conflict_free:v6_double_buffered:4096}} faster. A
   small Python model of the bank rules predicted the profiler's count exactly.
-- **Occupancy beat everything else the sweep tried.** Capping registers at 128 to fit a fourth
-  block per SM, and choosing the tile per size, took the kernel from
+- **Occupancy plus register prefetch closed the rest.** Capping registers at 128 to fit a fourth
+  block per SM, prefetching the next k-step's operands into registers (v14), and choosing the
+  tile per size from the average of several tuning runs took the kernel from
   {{pct:v7_conflict_free:4096}} (v7) to {{pct:v12_dispatch:4096}} (v12) at N = 4096.
 - **Two textbook optimisations did nothing, and the machine code shows why.** The compiler had
   already vectorised v4's shared loads (v5), and it already turns WMMA into `LDSM`/`HMMA`, so
@@ -45,6 +46,7 @@ v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size a
 
 - **Tensor cores (FP16 in, FP32 accumulate):** {{tc_best_tflops:2048}} TFLOP/s with
   {{tc_best:2048}}, {{tc_best_pct:2048}} of `cublasGemmEx`.
+  A tile sweep (tc5) reaches {{tctune_best_pct:4096}} of `cublasGemmEx` at N = 4096.
 - **Fused epilogue (GEMM + bias + GELU/ReLU):** up to {{epi_best}} faster than cuBLAS followed by a
   separate bias + activation kernel.
 - **Parallel reduction study:** r0 → r5 reaches {{red_gbps:r5_grid_stride}} GB/s,

@@ -2,16 +2,18 @@
 
 # cuda-sgemm
 
+![CI](https://github.com/246mayank/cuda-sgemm/actions/workflows/ci.yml/badge.svg)
+
 FP32 matrix multiply (SGEMM) in CUDA C++, optimised one idea at a time on an NVIDIA Tesla T4,
 with every kernel checked against cuBLAS, profiled with Nsight Compute, and every number in
 this README generated from the CSVs in [`results/`](results/).
 
 **Result:** the final kernel, `v12_dispatch` (per-size tuned tiles, with split-K for grids that
-can't fill the GPU), reaches **88.6% of cuBLAS at N = 4096** and **beats cuBLAS
-at N = 256 (120.5%)**. The best single configuration measured
-90.1% at N = 4096. Split-K lifts a
-skinny transformer shape (128 × 4096 × 4096) from 75.6% to
-**89.7%**. 83/83 kernel/size results pass the
+can't fill the GPU), reaches **90.7% of cuBLAS at N = 4096** and **beats cuBLAS
+at N = 256 (118.9%)**. The best single configuration measured
+90.8% at N = 4096. Split-K lifts a
+skinny transformer shape (128 × 4096 × 4096) from 72.4% to
+**90.6%**. 90/90 kernel/size results pass the
 cuBLAS check, including the awkward sizes 1000 and 1023.
 
 ![GFLOP/s vs size](figures/gflops_vs_size.png)
@@ -25,15 +27,16 @@ cuBLAS check, including the awkward sizes 1000 and 1023.
 | `v0_naive` | one thread per output, uncoalesced loads | 1% |  |
 | `v1_coalesced` | threads remapped so a warp reads contiguous memory | 11% | 11% |
 | `v2_smem_tiling` | 32×32 tiles staged in shared memory | 14% | 13% |
-| `v3_1d_blocktiling` | 8 outputs per thread (register reuse) | 33% | 28% |
+| `v3_1d_blocktiling` | 8 outputs per thread (register reuse) | 33% | 29% |
 | `v4_2d_blocktiling` | 8×8 outputs per thread | 61% | 61% |
-| `v5_vectorized` | 128-bit loads, transposed A tile (null result) | 61% | 58% |
-| `v6_double_buffered` | load next tile during math | 63% | 58% |
-| `v7_conflict_free` | thread layout with zero bank conflicts | 83% | 82% |
-| `v8_warptiling` | warp-level tile (null result) | 82% | 82% |
-| `v9_autotuned` | per-size tile chosen from a tuning sweep | 90% | 89% |
+| `v5_vectorized` | 128-bit loads, transposed A tile (null result) | 62% | 57% |
+| `v6_double_buffered` | load next tile during math | 63% | 59% |
+| `v7_conflict_free` | thread layout with zero bank conflicts | 82% | 81% |
+| `v8_warptiling` | warp-level tile (null result) | 81% | 81% |
+| `v9_autotuned` | per-size tile chosen from a tuning sweep | 88% | 91% |
 | `v11_splitk` | split-K when the grid can't fill the GPU | 88% | 90% |
-| `v12_dispatch` | picks v9 or v11 by grid fill | 89% | 89% |
+| `v12_dispatch` | picks v9 or v11 by grid fill | 89% | 91% |
+| `v15_splitk_det` | split-K with a fixed-order sum (bit-reproducible) | 89% | 89% |
 
 v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size are in the
 [full analysis](docs/ANALYSIS.md).
@@ -42,11 +45,12 @@ v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size a
 
 - **Bank conflicts were the hidden limiter.** Nsight Compute counted
   2.0 conflicts per shared load in v4–v6. A new thread
-  layout (v7) removed them: 1.42x faster. A
+  layout (v7) removed them: 1.37x faster. A
   small Python model of the bank rules predicted the profiler's count exactly.
-- **Occupancy beat everything else the sweep tried.** Capping registers at 128 to fit a fourth
-  block per SM, and choosing the tile per size, took the kernel from
-  82.1% (v7) to 88.6% (v12) at N = 4096.
+- **Occupancy plus register prefetch closed the rest.** Capping registers at 128 to fit a fourth
+  block per SM, prefetching the next k-step's operands into registers (v14), and choosing the
+  tile per size from the average of several tuning runs took the kernel from
+  81.2% (v7) to 90.7% (v12) at N = 4096.
 - **Two textbook optimisations did nothing, and the machine code shows why.** The compiler had
   already vectorised v4's shared loads (v5), and it already turns WMMA into `LDSM`/`HMMA`, so
   hand-written PTX tensor-core code (tc3, tc4) didn't beat it.
@@ -56,10 +60,13 @@ v0 isn't run above N = 2048 (2 s per launch). Raw GFLOP/s and every other size a
 
 ## Also in this repo
 
-- **Tensor cores (FP16 in, FP32 accumulate):** 27.1 TFLOP/s with
-  `tc1_wmma_smem`, 69.0% of `cublasGemmEx`.
-- **Parallel reduction study:** r0 → r5 reaches 277 GB/s,
-  104% of CUB.
+- **Tensor cores (FP16 in, FP32 accumulate):** 26.6 TFLOP/s with
+  `tc1_wmma_smem`, 68.2% of `cublasGemmEx`.
+  A tile sweep (tc5) reaches 70.6% of `cublasGemmEx` at N = 4096.
+- **Fused epilogue (GEMM + bias + GELU/ReLU):** up to n/a faster than cuBLAS followed by a
+  separate bias + activation kernel.
+- **Parallel reduction study:** r0 → r5 reaches 276 GB/s,
+  103% of CUB.
 - **Roofline, tuning sweep, real-world shapes, SASS analysis, methodology:** see the
   **[full analysis →](docs/ANALYSIS.md)**.
 - **Study guide** for every technique used here: [docs/LEARNING.md](docs/LEARNING.md).
@@ -77,6 +84,7 @@ python scripts/make_tables.py
 ```
 
 Anywhere with CUDA: `make` then `./bench` (or `./bench --tc`, `--tune`, `--shapes`, `./reduce`).
+Tests (no GPU needed; they replay every kernel's index math on the CPU): `python -m pytest tests`.
 
 ## Credits
 
